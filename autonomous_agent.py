@@ -647,6 +647,11 @@ def execute_action_tags(reply_text: str):
     if re.search(r'\[(?:互动|Interact|interact):\s*(?:点赞|Like|like)\]|\[(?:like|Like)\]', reply_text, re.IGNORECASE):
         call_onebot_api("send_like", {"user_id": config["master_qq"], "times": 10})
 
+    # 6. Realtime Memory Updates
+    mem_matches = re.findall(r'\[(?:更新记忆|Update Memory|update_memory|remember|Remember):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
+    for mem_content in mem_matches:
+        update_memory_realtime(mem_content)
+
 def clean_tags(reply_text: str) -> str:
     text = re.sub(r'\[(?:发贴图|Send Sticker|Sticker|sticker):[^\]]+\]', '', reply_text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:发表情|Send Face|Face|face|Emoji|emoji):[^\]]+\]', '', text, flags=re.IGNORECASE)
@@ -678,7 +683,23 @@ def execute_tool_call(tool_name: str, arguments: dict) -> str:
     except Exception as e:
         return f"Tool execution error: {e}"
 
-def query_llm(user_prompt: str, images_b64: list) -> str:
+def record_chat_turn(user_content: str, assistant_reply: str, has_image: bool = False):
+    """Persists a single confirmed, non-interrupted conversational turn to memory and chat history."""
+    with memory_lock:
+        clean_user = user_content.strip()
+        clean_assistant = clean_tags(assistant_reply).strip()
+        conversation_history.append({"role": "user", "content": clean_user})
+        conversation_history.append({"role": "assistant", "content": clean_assistant})
+        save_history()
+
+    # Append to persistent full chat history file
+    append_to_full_chat_history("user", clean_user, has_image=has_image)
+    append_to_full_chat_history("assistant", clean_assistant)
+
+    if len(conversation_history) >= config.get("compact_threshold", 30):
+        threading.Thread(target=trigger_auto_compact, daemon=True).start()
+
+def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
     load_config()
     system_prompt = load_system_prompt()
 
@@ -733,6 +754,11 @@ def query_llm(user_prompt: str, images_b64: list) -> str:
 
     # ReAct tool-execution loop (up to 3 turns)
     for iteration in range(3):
+        with batch_lock:
+            if gen_id and gen_id != current_generation_id:
+                logging.info(f"LLM loop iteration #{iteration+1} aborted early: generation #{gen_id} was superseded by #{current_generation_id}.")
+                return ""
+
         payload = {
             "model": config.get("model", "google/gemini-3.8-flash"),
             "messages": messages,
@@ -810,19 +836,6 @@ def query_llm(user_prompt: str, images_b64: list) -> str:
         # Final conversational response
         reply_sanitized = sanitize_reply(raw_reply)
         if reply_sanitized:
-            with memory_lock:
-                conversation_history.append({"role": "user", "content": history_record_text})
-                clean_for_history = clean_tags(reply_sanitized)
-                conversation_history.append({"role": "assistant", "content": clean_for_history})
-                save_history()
-
-            # Append to persistent full chat history file
-            append_to_full_chat_history("user", history_record_text, has_image=bool(images_b64))
-            append_to_full_chat_history("assistant", clean_for_history)
-
-            if len(conversation_history) >= config.get("compact_threshold", 30):
-                threading.Thread(target=trigger_auto_compact, daemon=True).start()
-
             return reply_sanitized
 
         return "I'm here! What can I do for you?"
@@ -830,53 +843,109 @@ def query_llm(user_prompt: str, images_b64: list) -> str:
     return "I spaced out for a moment, could you repeat that?"
 
 pending_messages = []
+in_flight_messages = []
 debounce_timer = None
 batch_lock = threading.Lock()
-is_generating = False
+current_generation_id = 0
+first_message_time = 0.0
 
-def process_pending_messages():
-    """Gathers all accumulated messages and dispatches them for LLM response generation."""
-    global pending_messages, is_generating
+def trigger_generation(gen_id: int):
+    """Dispatches accumulated messages for LLM response generation."""
+    global pending_messages, in_flight_messages, first_message_time
     with batch_lock:
-        if not pending_messages:
+        if gen_id != current_generation_id:
             return
-        if is_generating:
+        if not pending_messages and not in_flight_messages:
             return
-        is_generating = True
+
+        # If previous in_flight_messages were interrupted by newer pending messages,
+        # merge them seamlessly so no context is ever dropped!
+        if in_flight_messages:
+            logging.info(f"Merging {len(in_flight_messages)} in-flight messages with {len(pending_messages)} pending messages.")
+            pending_messages = in_flight_messages + pending_messages
+            in_flight_messages = []
+
         batch_to_process = list(pending_messages)
+        in_flight_messages = list(batch_to_process)
         pending_messages.clear()
+        first_message_time = 0.0
 
-    threading.Thread(target=_worker_generation_thread, args=[batch_to_process], daemon=True).start()
+    threading.Thread(target=_worker_generation_thread, args=[batch_to_process, gen_id], daemon=True).start()
 
-def _worker_generation_thread(batch_to_process: list):
-    global is_generating
+def _worker_generation_thread(batch_to_process: list, gen_id: int):
+    """Worker thread executing the generation for a batch with non-destructive interruption."""
+    global in_flight_messages
     try:
-        all_texts = []
+        with batch_lock:
+            if gen_id != current_generation_id:
+                logging.info(f"Generation #{gen_id} pre-aborted (superseded by #{current_generation_id}).")
+                return
+
+        lang = config.get("language", "zh").lower()
         all_images = []
-        for item in batch_to_process:
+        lines_for_llm = []
+        lines_for_history = []
+
+        for idx, item in enumerate(batch_to_process, 1):
             txt = item.get("text", "").strip()
             imgs = item.get("images", [])
-            if txt:
-                all_texts.append(txt)
             if imgs:
                 all_images.extend(imgs)
 
-        if not all_texts and not all_images:
+            has_img = bool(imgs)
+            img_tag_prompt = "[Sent an Image]" if lang == "en" else "[发送了图片]"
+            img_tag_hist = "[Image]" if lang == "en" else "[图片]"
+
+            if txt and has_img:
+                lines_for_llm.append(f"{idx}. {txt} {img_tag_prompt}")
+                lines_for_history.append(f"{txt} {img_tag_hist}")
+            elif txt:
+                lines_for_llm.append(f"{idx}. {txt}")
+                lines_for_history.append(txt)
+            elif has_img:
+                lines_for_llm.append(f"{idx}. {img_tag_prompt}")
+                lines_for_history.append(img_tag_hist)
+
+        if not lines_for_llm and not all_images:
             return
 
-        if len(all_texts) == 0:
-            combined_text = ""
-        elif len(all_texts) == 1:
-            combined_text = all_texts[0]
+        if len(lines_for_llm) <= 1:
+            user_prompt_for_llm = lines_for_llm[0] if lines_for_llm else ""
+            default_empty = "[Image]" if lang == "en" else "[图片]"
+            history_record_text = lines_for_history[0] if lines_for_history else default_empty
         else:
-            combined_text = "\n".join(all_texts)
+            combined_dialogue = "\n".join(lines_for_llm)
+            if lang == "en":
+                user_prompt_for_llm = (
+                    f"The user sent the following messages in a row:\n{combined_dialogue}\n"
+                    "(Please consider the overall context and reply naturally and cohesively in a single response.)"
+                )
+            else:
+                user_prompt_for_llm = (
+                    f"对方连续发送了以下几条短消息：\n{combined_dialogue}\n"
+                    "（请结合以上全部短消息综合理解对方意图，统一、自然随性地回复，无需机械割裂地逐条分别回复。）"
+                )
+            history_record_text = "\n".join(lines_for_history)
 
         now_str = datetime.datetime.now().strftime("%H:%M:%S")
-        logging.info(f"User [{now_str}] (Batch of {len(batch_to_process)}): {combined_text[:120]}")
+        logging.info(f"User [{now_str}] (Batch of {len(batch_to_process)}): {history_record_text[:120]}")
 
-        reply = query_llm(combined_text, all_images)
+        reply = query_llm(user_prompt_for_llm, all_images, gen_id=gen_id)
+        if not reply:
+            return
+
+        with batch_lock:
+            if gen_id != current_generation_id:
+                logging.info(f"Generation #{gen_id} was superseded by #{current_generation_id}. Discarding partial reply so messages can be merged together.")
+                return
+            in_flight_messages.clear()
+
         logging.info(f"Agent [{now_str}]: {reply}")
 
+        # Record to persistent memory & chat logs ONLY for the confirmed winning reply
+        record_chat_turn(history_record_text, reply, has_image=bool(all_images))
+
+        # Execute actions (stickers, QQ faces, voice, poke, memory updates)
         execute_action_tags(reply)
 
         clean_text_reply = clean_tags(reply)
@@ -886,20 +955,19 @@ def _worker_generation_thread(batch_to_process: list):
                 "message": clean_text_reply
             })
     except Exception as e:
-        logging.error(f"Error in batch generation: {e}")
+        logging.error(f"Error in batch generation #{gen_id}: {e}")
         traceback.print_exc()
-    finally:
         with batch_lock:
-            is_generating = False
-            if pending_messages:
-                debounce_delay = config.get("debounce_delay_sec", 1.8)
-                threading.Timer(debounce_delay, process_pending_messages).start()
+            if gen_id == current_generation_id:
+                in_flight_messages.clear()
 
 def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
-    global debounce_timer
+    global debounce_timer, current_generation_id, first_message_time
     if msg_id in processed_message_ids:
         return
     processed_message_ids.add(msg_id)
+    if len(processed_message_ids) > 10000:
+        processed_message_ids.difference_update(list(processed_message_ids)[:-5000])
 
     if sender_id != config["master_qq"]:
         return
@@ -907,8 +975,11 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
     clean_text, images_b64, has_voice = parse_incoming_cq_content(raw_text)
 
     with batch_lock:
-        if debounce_timer and debounce_timer.is_alive():
-            debounce_timer.cancel()
+        current_generation_id += 1
+        gen_id = current_generation_id
+
+        if not pending_messages:
+            first_message_time = time.time()
 
         pending_messages.append({
             "msg_id": msg_id,
@@ -917,9 +988,18 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
             "time": time.time()
         })
 
-        debounce_delay = config.get("debounce_delay_sec", 1.8)
-        debounce_timer = threading.Timer(debounce_delay, process_pending_messages)
-        debounce_timer.start()
+        if debounce_timer and debounce_timer.is_alive():
+            debounce_timer.cancel()
+
+        max_wait_sec = config.get("max_batch_wait_sec", 10.0)
+        debounce_delay = config.get("debounce_delay_sec", 2.2)
+
+        if time.time() - first_message_time >= max_wait_sec:
+            logging.info("Batch max wait time reached; triggering generation immediately.")
+            threading.Thread(target=trigger_generation, args=[gen_id], daemon=True).start()
+        else:
+            debounce_timer = threading.Timer(debounce_delay, trigger_generation, args=[gen_id])
+            debounce_timer.start()
 
 def poll_messages_loop():
     logging.info("Active High-Frequency Poller started...")
@@ -946,7 +1026,7 @@ def poll_messages_loop():
                         on_message_arrived(mid, sender_id, text)
         except Exception as e:
             logging.warning(f"Poll loop exception: {e}")
-        time.sleep(config.get("poll_interval_sec", 1.2))
+        time.sleep(config.get("poll_interval_sec", 0.8))
 
 def main():
     load_config()
