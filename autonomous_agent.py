@@ -274,31 +274,36 @@ def update_memory_realtime(content: str) -> str:
         if existing:
             updated = f"{existing}\n{new_entry}"
         else:
-            updated = f"【长期记忆档案】\n{new_entry}"
+            header = "【Long-Term Memory Archive】" if config.get("language", "zh").lower() == "en" else "【长期记忆档案】"
+            updated = f"{header}\n{new_entry}"
 
         long_term_memory = updated
         save_long_term_memory()
 
     logging.info(f"Realtime Memory Updated: {new_entry}")
-    return f"已成功将新信息记入长期记忆：{clean_content}"
+    lang = config.get("language", "zh").lower()
+    return f"Successfully saved to long-term memory: {clean_content}" if lang == "en" else f"已成功将新信息记入长期记忆：{clean_content}"
 
 def read_memory_file() -> str:
     """Reads the full memory_summary.txt."""
+    lang = config.get("language", "zh").lower()
+    empty_msg = "Long-term memory archive is currently empty." if lang == "en" else "长期记忆档案目前为空。"
     with memory_lock:
         if os.path.exists(MEMORY_SUMMARY_FILE):
             try:
                 with open(MEMORY_SUMMARY_FILE, "r", encoding="utf-8-sig") as f:
                     content = f.read().strip()
-                    return content if content else "长期记忆档案目前为空。"
+                    return content if content else empty_msg
             except Exception as e:
-                return f"读取记忆失败: {e}"
-    return "长期记忆档案目前为空。"
+                return f"Failed to read memory: {e}" if lang == "en" else f"读取记忆失败: {e}"
+    return empty_msg
 
 def search_chat_history(query: str, max_results: int = 8) -> str:
     """Searches chat_history.jsonl (and agent.log as fallback) for matching dialogue turns."""
     clean_q = query.strip()
+    lang = config.get("language", "zh").lower()
     if not clean_q:
-        return "搜索关键词不能为空。"
+        return "Search keyword cannot be empty." if lang == "en" else "搜索关键词不能为空。"
 
     matches = []
     # 1. Search full chat history jsonl
@@ -346,16 +351,21 @@ def search_chat_history(query: str, max_results: int = 8) -> str:
             logging.warning(f"Error searching {LOG_FILE}: {e}")
 
     if matches:
-        return "【过往相关聊天记录 / Chat History Matches】:\n" + "\n---\n".join(matches)
-    return f"未找到关于“{clean_q}”的过往聊天记录。"
+        title = "【Chat History Matches】:\n" if lang == "en" else "【过往相关聊天记录】:\n"
+        return title + "\n---\n".join(matches)
+    return f"No past chat logs found for '{clean_q}'." if lang == "en" else f"未找到关于“{clean_q}”的过往聊天记录。"
 
 def web_search(query: str, max_results: int = 4) -> str:
     """Executes live web search using ddgs with multiple resilient fallbacks."""
+    lang = config.get("language", "zh").lower()
     if not config.get("enable_web_search", True):
-        return "网络搜索功能已被禁用。"
+        return "Web search is currently disabled." if lang == "en" else "网络搜索功能已被禁用。"
     clean_q = query.strip()
     if not clean_q:
-        return "搜索关键词不能为空。"
+        return "Search query cannot be empty." if lang == "en" else "搜索关键词不能为空。"
+
+    snippet_label = "Snippet" if lang == "en" else "摘要"
+    link_label = "Link" if lang == "en" else "链接"
 
     # Method 1: ddgs
     try:
@@ -367,7 +377,7 @@ def web_search(query: str, max_results: int = 4) -> str:
                 title = r.get("title", "")
                 body = r.get("body", "") or r.get("snippet", "")
                 href = r.get("href", "") or r.get("link", "")
-                lines.append(f"[{i+1}] {title}\n摘要: {body}\n链接: {href}")
+                lines.append(f"[{i+1}] {title}\n{snippet_label}: {body}\n{link_label}: {href}")
             return "\n\n".join(lines)
     except Exception as e:
         logging.warning(f"ddgs search failed: {e}")
@@ -382,7 +392,7 @@ def web_search(query: str, max_results: int = 4) -> str:
                 title = r.get("title", "")
                 body = r.get("body", "") or r.get("snippet", "")
                 href = r.get("href", "")
-                lines.append(f"[{i+1}] {title}\n摘要: {body}\n链接: {href}")
+                lines.append(f"[{i+1}] {title}\n{snippet_label}: {body}\n{link_label}: {href}")
             return "\n\n".join(lines)
     except Exception as e:
         logging.warning(f"duckduckgo_search fallback failed: {e}")
@@ -390,7 +400,8 @@ def web_search(query: str, max_results: int = 4) -> str:
     # Method 3: Wikipedia API fallback
     try:
         encoded_q = urllib.parse.quote(clean_q)
-        wiki_url = f"https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded_q}&format=json&utf8="
+        wiki_domain = "en.wikipedia.org" if lang == "en" else "zh.wikipedia.org"
+        wiki_url = f"https://{wiki_domain}/w/api.php?action=query&list=search&srsearch={encoded_q}&format=json&utf8="
         req = urllib.request.Request(wiki_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -400,12 +411,12 @@ def web_search(query: str, max_results: int = 4) -> str:
                 for i, it in enumerate(items[:max_results]):
                     title = it.get("title", "")
                     snippet = re.sub(r'<[^>]+>', '', it.get("snippet", ""))
-                    lines.append(f"[{i+1}] {title}\n摘要: {snippet}")
+                    lines.append(f"[{i+1}] {title}\n{snippet_label}: {snippet}")
                 return "\n\n".join(lines)
     except Exception as e:
         logging.warning(f"Wiki fallback failed: {e}")
 
-    return f"未能获取到“{clean_q}”的有效搜索结果。"
+    return f"No valid search results found for '{clean_q}'." if lang == "en" else f"未能获取到“{clean_q}”的有效搜索结果。"
 
 def trigger_auto_compact():
     global conversation_history, long_term_memory
@@ -558,10 +569,23 @@ def sanitize_reply(text: str) -> str:
     
     return cleaned.strip()
 
+STICKER_ALIASES = {
+    "heart": ["比心", "爱心", "心心", "love", "heart", "like"],
+    "wave": ["挥手", "打招呼", "问好", "wave", "hello", "hi"],
+    "sleep": ["睡觉", "晚安", "困困", "sleep", "sleepy", "goodnight"],
+    "avatar": ["自拍", "照片", "avatar", "photo", "selfie"],
+    "pout": ["委屈", "生气", "撒娇", "pout", "angry"],
+}
+
 async def synthesize_voice_file(text: str, output_path: str):
     if not EDGE_TTS_AVAILABLE:
         return False
-    voice = config.get("voice_character", "zh-CN-XiaoyiNeural")
+    lang = config.get("language", "zh").lower()
+    configured_voice = config.get("voice_character", "")
+    if lang == "en" and (not configured_voice or configured_voice.startswith("zh-")):
+        voice = "en-US-JennyNeural"
+    else:
+        voice = configured_voice or "zh-CN-XiaoyiNeural"
     clean_txt = clean_tags(text)
     if not clean_txt:
         return False
@@ -596,11 +620,22 @@ def execute_action_tags(reply_text: str):
         kw = kw.strip().lower()
         matched_file = None
         if os.path.exists(STICKERS_DIR):
-            for fname in os.listdir(STICKERS_DIR):
+            dir_files = os.listdir(STICKERS_DIR)
+            for fname in dir_files:
                 base_name, _ = os.path.splitext(fname)
                 if kw in base_name.lower() or base_name.lower() in kw:
                     matched_file = fname
                     break
+            if not matched_file:
+                for alias_key, alias_list in STICKER_ALIASES.items():
+                    if kw in alias_list or kw == alias_key:
+                        for fname in dir_files:
+                            base_name, _ = os.path.splitext(fname)
+                            if any(a.lower() in base_name.lower() for a in alias_list):
+                                matched_file = fname
+                                break
+                    if matched_file:
+                        break
         if matched_file:
             path = os.path.join(STICKERS_DIR, matched_file)
             if os.path.exists(path):
