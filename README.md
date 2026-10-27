@@ -56,8 +56,8 @@ flowchart LR
 ### 2. Installation
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/qq-ai-companion.git
-cd qq-ai-companion
+git clone https://github.com/intfloatjohn/AI2QQ.git
+cd AI2QQ
 
 # Install dependencies
 pip install -r requirements.txt
