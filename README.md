@@ -19,16 +19,22 @@
 
 * **⚡ Ultra-Low RAM Footprint**:
   * Core Python daemon consumes **only ~30MB RAM**, perfect for running 24/7 on low-cost Linux VPS (1 vCPU / 512MB-1GB RAM).
-* **🧠 Auto-Compact Long-Term Memory**:
-  * Dual-layer memory architecture: maintains recent dialogue turns in `history.json` while automatically consolidating older turns into persistent facts in `memory_summary.txt`. Never forgets user preferences or past events without overflowing token limits!
-* **🚀 Smart Debounce & Real-Time Interruption**:
-  * Automatically bundles rapid consecutive messages into a single prompt. If newer messages arrive while the LLM is generating, the daemon immediately cancels outdated processing and synthesizes the updated batch.
+* **🧠 Dynamic Long-Term Memory & Real-Time Memorization**:
+  * Dual-layer memory architecture: maintains recent dialogue turns in `history.json` while allowing the model to instantly memorize new facts via `[Update Memory: ...]` into `memory_summary.txt`. Auto-Compact compresses older turns without overflowing token limits!
+* **📜 Full Chat History Persistence & Search**:
+  * Permanently logs all conversations to `chat_history.jsonl` with timestamps. The model can search past dialogue anytime via `[Search History: keyword]`.
+* **🔍 Live Web Search**:
+  * Built-in real-time web search (`[Search: query]`), enabling the companion to fetch latest news, weather, technical facts, and real-time knowledge.
+* **🚀 Smart Message Debounce & Non-Dropping Queue**:
+  * Rapid bursts of messages are cleanly combined into cohesive context. Queue protection ensures no messages are discarded or forgotten.
 * **👁️ Multimodal Vision (Zero-Fail Fallback)**:
   * Automatically downloads images/memes with custom HTTP headers, backed by direct local disk retrieval via OneBot `get_image` API.
 * **🎙️ Voice Messages (Edge-TTS)**:
   * Generates native QQ voice messages via Microsoft Edge Neural TTS (`zh-CN-XiaoyiNeural`, `zh-CN-XiaoxiaoNeural`, etc.). Completely free, GPU-less, and realistic.
+* **🔌 Native MCP Server (Model Context Protocol)**:
+  * Includes `mcp-server/onebot_mcp.py` for direct integration with Claude Desktop, Cursor, Antigravity, and other MCP clients.
 * **🎭 Model-Agnostic Persona Engine**:
-  * Persona, tone, and action guidelines are stored in `persona/*.md`. Hot-reloads on every message — change models (Gemini 3.8 Flash, GPT-4o, Claude, DeepSeek) seamlessly with instant adaptation!
+  * Persona, tone, and action guidelines are stored in `persona/*.md`. Hot-reloads on every message with human-like conversation style (no repetitive emoji suffixes, flexible lengths).
 * **🏷️ Rich Action Tags**:
   * Supports inline tags for QQ Yellow Faces (`[Send Face: Hug]`), custom stickers (`[Send Sticker: Heart]`), voice notes (`[Send Voice: ...]`), and interactions (`[Interact: Poke]`).
 * **🌐 Cross-Platform & Headless Server Ready**:

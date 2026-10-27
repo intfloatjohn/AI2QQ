@@ -16,8 +16,10 @@ agent.log
 
 # Dynamic runtime memory and history (do not commit user chat records)
 history.json
+chat_history.jsonl
 memory_summary.txt
 temp_reply.mp3
+temp_mcp_reply.mp3
 *.mp3
 
 # Operating System files

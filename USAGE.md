@@ -6,13 +6,16 @@
 
 ## 目录
 1. [哪里编写人格文件？](#1-哪里编写人格文件)
-2. [AutoCompact 长期记忆怎么管理？](#2-autocompact-长期记忆怎么管理)
-3. [日志等级（Log Level）怎么调整？](#3-日志等级log-level怎么调整)
-4. [如何让 AI 自己找并发送表情包/贴图？](#4-如何让-ai-自己找并发送表情包贴图)
-5. [语音收发（Voice / TTS）功能指南](#5-语音收发voice--tts功能指南)
-6. [配置文件与核心参数说明](#6-配置文件与核心参数说明)
-7. [Debian / Linux 无头部署与终端扫码](#7-debian--linux-无头部署与终端扫码)
-8. [Windows 一键部署与双击运行](#8-windows-一键部署与双击运行)
+2. [AutoCompact 长期记忆与实时记忆管理](#2-autocompact-长期记忆与实时记忆管理)
+3. [全量聊天记录持久化与检索功能](#3-全量聊天记录持久化与检索功能)
+4. [实时联网搜索功能 (Web Search)](#4-实时联网搜索功能-web-search)
+5. [日志等级（Log Level）怎么调整？](#5-日志等级log-level怎么调整)
+6. [如何让 AI 自己找并发送表情包/贴图？](#6-如何让-ai-自己找并发送表情包贴图)
+7. [语音收发（Voice / TTS）功能指南](#7-语音收发voice--tts功能指南)
+8. [MCP 服务端与外部客户端接入 (onebot_mcp.py)](#8-mcp-服务端与外部客户端接入-onebot_mcppy)
+9. [配置文件与核心参数说明](#9-配置文件与核心参数说明)
+10. [Debian / Linux 无头部署与终端扫码](#10-debian--linux-无头部署与终端扫码)
+11. [Windows 一键部署与双击运行](#11-windows-一键部署与双击运行)
 
 ---
 
@@ -30,23 +33,46 @@
 
 ---
 
-## 2. AutoCompact 长期记忆怎么管理？
+## 2. AutoCompact 长期记忆与实时记忆管理
 
 ### 工作原理
-框架采用**双层记忆机制**：
-1. **短期近期上下文**（`history.json`）：保留最近 6~8 轮的原汁原味聊天对话。
-2. **长期记忆摘要**（`memory_summary.txt`）：当 `history.json` 累积到阈值（默认 14 轮）时，程序会自动在后台调用模型，将较早的对话提取沉淀为客观事实要点存入 `memory_summary.txt`，同时裁剪 `history.json`。
+框架采用**动态多层记忆架构**：
+1. **短期近期上下文**（`history.json`）：保留最近活跃的连续聊天记录。
+2. **实时记忆动态更新**：模型在对话中识别到重要事实或用户要求“记住...”时，可直接触发 `[更新记忆: 内容]`，后台立即持久化追加至 `memory_summary.txt`，无需等待对话压缩！
+3. **长期记忆查阅**：模型可自主决定是否通过 `[查看记忆]` 调阅完整的 `memory_summary.txt`。
+4. **长期记忆自动沉淀（Auto-Compact）**：当对话轮次到达阈值（默认 30 轮）时，程序会自动在后台将旧对话提取要点合并进 `memory_summary.txt`，同时保留最新 12 轮上下文。
 
 ### 怎么管理与调试？
-* **调整触发时机**：在 `config.json` 中调整：
-  * `"compact_threshold": 14`：多少轮对话触发一次自动压缩。
-  * `"compact_keep_recent": 6`：压缩后保留多少条最新消息不压缩。
-* **查看/修改记忆**：直接打开 `memory_summary.txt`，你可以手动在里面新增事实（比如 `1. 用户的生日是X月X日`），模型每次回复都会永久参考这段长期记忆！
-* **清除全部记忆**：清空 `memory_summary.txt` 并将 `history.json` 改为 `[]` 即可。
+* **实时更新指令**：在聊天时对机器人说“记住我喜欢喝冰拿铁”，机器人会回复并执行 `[更新记忆: 用户喜欢喝冰拿铁]`。
+* **查看/修改记忆**：直接打开 `memory_summary.txt` 即可手动新增、修改或校对。
+* **清除记忆**：清空 `memory_summary.txt` 并将 `history.json` 置为 `[]`。
 
 ---
 
-## 3. 日志等级（Log Level）怎么调整？
+## 3. 全量聊天记录持久化与检索功能
+
+### 永久历史库 (`chat_history.jsonl`)
+每一次用户发送的消息和 AI 生成的回复都会带有精准的时间戳永久记录在 `chat_history.jsonl` 中，永不丢失，哪怕经历了 Auto-Compact 裁剪，原始对话也始终完整留存。
+
+### 历史记录智能检索
+模型可以通过以下指令随时翻阅过去的聊天记录：
+* **模型调用标签**：`[搜索聊天记录: 关键词]`（英文模式：`[Search History: keyword]`）
+* **示例**：当用户问“你还记得我上周提过的那个项目叫什么吗？”，模型输出 `[搜索聊天记录: 项目]`，系统会自动检索 `chat_history.jsonl` 并将包含上下文的时间与对话反馈给模型。
+
+---
+
+## 4. 实时联网搜索功能 (Web Search)
+
+系统内置了多引擎实时联网搜索功能（优先使用 `ddgs`，支持 DuckDuckGo / 维基百科 API 等兜底）：
+* **触发方式**：
+  * 内联标签：`[搜索: 关键词]`（英文模式：`[Search: query]`）
+  * 原生函数调用：`web_search(query)`
+* **配置开关**：在 `config.json` 中配置 `"enable_web_search": true` 以及 `"max_search_results": 4`。
+* **场景**：天气预报、最新时事新闻、百科知识、开发文档查询等。
+
+---
+
+## 5. 日志等级（Log Level）怎么调整？
 
 在 `config.json` 中修改 `"log_level"` 参数：
 ```json
@@ -62,7 +88,7 @@
 
 ---
 
-## 4. 如何让 AI 自己找并发送表情包/贴图？
+## 6. 如何让 AI 自己找并发送表情包/贴图？
 
 ### 步骤 A：把图片放入 `stickers/` 目录
 支持 `.jpg` 或 `.png` 格式，文件名建议用简短动词或情绪命名，例如：
@@ -82,7 +108,7 @@
 
 ---
 
-## 5. 语音收发（Voice / TTS）功能指南
+## 7. 语音收发（Voice / TTS）功能指南
 
 ### 5.1 语音发送 (TTS)
 系统内置了基于微软高质量云端语音引擎（`edge-tts`）的真实语音生成能力，纯 Python 运行，不消耗本机显卡/算力：
@@ -104,7 +130,29 @@
 
 ---
 
-## 6. 配置文件与核心参数说明 (`config.json`)
+## 8. MCP 服务端与外部客户端接入 (`onebot_mcp.py`)
+
+项目在 `mcp-server/onebot_mcp.py` 中内置了标准 Model Context Protocol (MCP 2.x) 服务端，便于通过 Claude Desktop、Cursor、Antigravity 等开发工具直接接管或调用 QQ 伴侣的能力：
+
+### 挂载的 MCP 工具列表：
+* `web_search`: 联网实时搜索
+* `search_chat_history`: 检索全量历史聊天记录库
+* `read_memory`: 读取长期记忆档案
+* `update_memory`: 写入/更新长期记忆档案
+* `send_voice_to_master`: 通过 Edge-TTS 语音合成直接向主人发送真实语音条
+* `qq_send_master_msg` / `qq_send_private_msg` / `qq_send_group_msg`: 消息发送
+* `qq_send_image`: 图片/贴图发送
+* `qq_poke_master` / `qq_send_like`: 戳一戳与名片点赞
+* `qq_get_recent_messages` / `qq_get_unread_messages`: 获取消息历史与未读队列
+
+### 启动 MCP 服务端：
+```bash
+python3 mcp-server/onebot_mcp.py
+```
+
+---
+
+## 9. 配置文件与核心参数说明 (`config.json`)
 
 ```json
 {
@@ -115,10 +163,15 @@
   "master_qq": 123456789,
   "bot_qq": 987654321,
   "onebot_http_api": "http://127.0.0.1:3000",
+  "language": "zh",
   "poll_interval_sec": 1.2,
   "debounce_delay_sec": 1.8,
-  "compact_threshold": 14,
-  "compact_keep_recent": 6,
+  "compact_threshold": 30,
+  "compact_keep_recent": 12,
+  "max_tokens": 1200,
+  "single_message_limit_hint": "日常闲聊保持自然随性节奏（几十至百余字），遇到需要深入分析、解答、分享或长篇交谈时可自主扩展，由模型根据语境自主决定回复长短，避免机械受限。",
+  "enable_web_search": true,
+  "max_search_results": 4,
   "log_level": "INFO",
   "enable_voice_reply": false,
   "voice_character": "zh-CN-XiaoyiNeural"
@@ -128,10 +181,13 @@
 * `master_qq`: 主人的 QQ 号（只回复主人的私聊消息）。
 * `debounce_delay_sec`: 防连击缓冲时间（秒）。用户连续发多句话时，等待 1.8 秒打包合并一次性思考回复。
 * `poll_interval_sec`: 轮询频率（秒），默认 1.2 秒检测一次新消息。
+* `compact_threshold` / `compact_keep_recent`: 对话长期记忆压缩阈值与保留轮数。
+* `max_tokens` / `single_message_limit_hint`: 软性回复长度与风格参考，模型根据语境自主拿捏，绝不死板截断。
+* `enable_web_search` / `max_search_results`: 实时联网搜索开关及单次条数。
 
 ---
 
-## 7. Debian / Linux 无头部署与终端扫码
+## 10. Debian / Linux 无头部署与终端扫码
 
 在没有图形界面的云服务器上部署 NapCatQQ：
 
