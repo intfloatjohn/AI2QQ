@@ -355,8 +355,10 @@ def search_chat_history(query: str, max_results: int = 8) -> str:
         return title + "\n---\n".join(matches)
     return f"No past chat logs found for '{clean_q}'." if lang == "en" else f"未找到关于“{clean_q}”的过往聊天记录。"
 
-def web_search(query: str, max_results: int = 4) -> str:
-    """Executes live web search using ddgs with multiple resilient fallbacks."""
+SEARCH_CACHE = {}
+
+def web_search(query: str, max_results: int = 3, gen_id: int = 0) -> str:
+    """Executes live web search with fast caching, strict timeout, and early abort."""
     lang = config.get("language", "zh").lower()
     if not config.get("enable_web_search", True):
         return "Web search is currently disabled." if lang == "en" else "网络搜索功能已被禁用。"
@@ -364,57 +366,62 @@ def web_search(query: str, max_results: int = 4) -> str:
     if not clean_q:
         return "Search query cannot be empty." if lang == "en" else "搜索关键词不能为空。"
 
+    with batch_lock:
+        if gen_id and gen_id != current_generation_id:
+            logging.info(f"web_search aborted: gen #{gen_id} superseded by #{current_generation_id}")
+            return ""
+
+    now = time.time()
+    if clean_q in SEARCH_CACHE and (now - SEARCH_CACHE[clean_q][0]) < 600:
+        logging.info(f"web_search cache hit for: {clean_q}")
+        return SEARCH_CACHE[clean_q][1]
+
     snippet_label = "Snippet" if lang == "en" else "摘要"
     link_label = "Link" if lang == "en" else "链接"
+    results_text = ""
 
-    # Method 1: ddgs
+    # Method 1: ddgs lite with strict 5s timeout
     try:
         from ddgs import DDGS
-        results = list(DDGS().text(clean_q, max_results=max_results))
-        if results:
-            lines = []
-            for i, r in enumerate(results):
+        items = list(DDGS(timeout=5).text(clean_q, max_results=max_results, backend="lite"))
+        if items:
+            lines_list = []
+            for i, r in enumerate(items):
                 title = r.get("title", "")
-                body = r.get("body", "") or r.get("snippet", "")
-                href = r.get("href", "") or r.get("link", "")
-                lines.append(f"[{i+1}] {title}\n{snippet_label}: {body}\n{link_label}: {href}")
-            return "\n\n".join(lines)
+                snippet = (r.get("body", "") or r.get("snippet", "")).strip()[:240]
+                lines_list.append(f"[{i+1}] {title}" + chr(10) + f"{snippet_label}: {snippet}")
+            results_text = (chr(10) + chr(10)).join(lines_list)
     except Exception as e:
-        logging.warning(f"ddgs search failed: {e}")
+        logging.warning(f"ddgs search failed ({e}), trying fallback...")
 
-    # Method 2: duckduckgo_search fallback
-    try:
-        from duckduckgo_search import DDGS
-        results = list(DDGS().text(clean_q, max_results=max_results))
-        if results:
-            lines = []
-            for i, r in enumerate(results):
-                title = r.get("title", "")
-                body = r.get("body", "") or r.get("snippet", "")
-                href = r.get("href", "")
-                lines.append(f"[{i+1}] {title}\n{snippet_label}: {body}\n{link_label}: {href}")
-            return "\n\n".join(lines)
-    except Exception as e:
-        logging.warning(f"duckduckgo_search fallback failed: {e}")
+    with batch_lock:
+        if gen_id and gen_id != current_generation_id:
+            return ""
 
-    # Method 3: Wikipedia API fallback
-    try:
-        encoded_q = urllib.parse.quote(clean_q)
-        wiki_domain = "en.wikipedia.org" if lang == "en" else "zh.wikipedia.org"
-        wiki_url = f"https://{wiki_domain}/w/api.php?action=query&list=search&srsearch={encoded_q}&format=json&utf8="
-        req = urllib.request.Request(wiki_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            items = data.get("query", {}).get("search", [])
-            if items:
-                lines = []
-                for i, it in enumerate(items[:max_results]):
-                    title = it.get("title", "")
-                    snippet = re.sub(r'<[^>]+>', '', it.get("snippet", ""))
-                    lines.append(f"[{i+1}] {title}\n{snippet_label}: {snippet}")
-                return "\n\n".join(lines)
-    except Exception as e:
-        logging.warning(f"Wiki fallback failed: {e}")
+    # Method 2: Wikipedia API fallback
+    if not results_text:
+        try:
+            import urllib.parse
+            encoded_q = urllib.parse.quote(clean_q)
+            wiki_domain = "en.wikipedia.org" if lang == "en" else "zh.wikipedia.org"
+            wiki_url = f"https://{wiki_domain}/w/api.php?action=query&list=search&srsearch={encoded_q}&format=json&utf8="
+            req = urllib.request.Request(wiki_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                witems = data.get("query", {}).get("search", [])
+                if witems:
+                    lines_list = []
+                    for i, it in enumerate(witems[:max_results]):
+                        title = it.get("title", "")
+                        snippet = re.sub(r"<[^>]+>", "", it.get("snippet", "")).strip()[:240]
+                        lines_list.append(f"[{i+1}] {title}" + chr(10) + f"{snippet_label}: {snippet}")
+                    results_text = (chr(10) + chr(10)).join(lines_list)
+        except Exception as e:
+            logging.warning(f"Wiki fallback failed: {e}")
+
+    if results_text:
+        SEARCH_CACHE[clean_q] = (now, results_text)
+        return results_text
 
     return f"No valid search results found for '{clean_q}'." if lang == "en" else f"未能获取到“{clean_q}”的有效搜索结果。"
 
@@ -699,12 +706,16 @@ def clean_tags(reply_text: str) -> str:
     text = re.sub(r'\[(?:搜索聊天记录|Search History|search_history|history):[^\]]+\]', '', text, flags=re.IGNORECASE)
     return text.strip()
 
-def execute_tool_call(tool_name: str, arguments: dict) -> str:
-    """Executes a tool call and returns the observation string."""
+def execute_tool_call(tool_name: str, arguments: dict, gen_id: int = 0) -> str:
+    """Executes a tool call with gen_id check and returns the observation string."""
+    with batch_lock:
+        if gen_id and gen_id != current_generation_id:
+            logging.info(f"execute_tool_call aborted: gen #{gen_id} superseded by #{current_generation_id}")
+            return ""
     try:
         if tool_name == "web_search":
             query = arguments.get("query", "")
-            return web_search(query, max_results=config.get("max_search_results", 4))
+            return web_search(query, max_results=config.get("max_search_results", 3), gen_id=gen_id)
         elif tool_name == "search_chat_history":
             query = arguments.get("query", "")
             return search_chat_history(query)
@@ -802,17 +813,48 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
             "tools": AVAILABLE_TOOLS
         }
 
-        try:
-            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=50) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as he:
-            err_body = he.read().decode("utf-8") if he.fp else str(he)
-            logging.warning(f"LLM call with tools failed ({he.code}): {err_body[:200]}, retrying without tools parameter...")
-            payload.pop("tools", None)
-            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=50) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+        data = {}
+        for attempt in range(2):
+            with batch_lock:
+                if gen_id and gen_id != current_generation_id:
+                    return ""
+            try:
+                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=35) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    break
+            except urllib.error.HTTPError as he:
+                err_body = he.read().decode("utf-8") if he.fp else str(he)
+                logging.warning(f"LLM call attempt #{attempt+1} failed ({he.code}): {err_body[:180]}")
+                if attempt == 0:
+                    time.sleep(1.2)
+                    clean_msgs = []
+                    for m in messages:
+                        if m.get("role") == "tool":
+                            label = "【Tool Search Observation】:" if lang == "en" else "【系统提示：工具搜索结果】:"
+                            clean_msgs.append({
+                                "role": "user",
+                                "content": label + chr(10) + str(m.get("content", "")) + chr(10) + ("Please reply naturally based on this." if lang == "en" else "请结合搜索结果自然回复。")
+                            })
+                        elif m.get("role") == "assistant" and m.get("tool_calls"):
+                            continue
+                        else:
+                            clean_msgs.append(m)
+                    payload = {
+                        "model": config.get("model", "google/gemini-3.8-flash"),
+                        "messages": clean_msgs,
+                        "temperature": 0.72,
+                        "max_tokens": max_tokens_val
+                    }
+                    continue
+                else:
+                    break
+            except Exception as e:
+                logging.warning(f"LLM call attempt #{attempt+1} error: {e}")
+                if attempt == 0:
+                    time.sleep(1.2)
+                    continue
+                break
 
         choice = data.get("choices", [{}])[0]
         message_obj = choice.get("message", {})
@@ -840,11 +882,17 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
                 except Exception:
                     fn_args = {}
                 logging.info(f"Executing Function Call: {fn_name}({fn_args})")
-                obs = execute_tool_call(fn_name, fn_args)
+                with batch_lock:
+                    if gen_id and gen_id != current_generation_id:
+                        return ""
+                obs = execute_tool_call(fn_name, fn_args, gen_id=gen_id)
+                with batch_lock:
+                    if gen_id and gen_id != current_generation_id:
+                        return ""
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": obs
+                    "content": (obs[:1200] if obs else ("No relevant information found." if lang == "en" else "未能获取到相关信息。"))
                 })
             continue
 
@@ -875,7 +923,10 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
 
         return "I'm here! What can I do for you?"
 
-    return "I spaced out for a moment, could you repeat that?"
+    lang = config.get("language", "zh").lower()
+    if lang == "en":
+        return "I experienced a temporary network timeout connecting to the AI brain. Please try asking again in a moment."
+    return "刚才连接大模型服务网络稍有超时。请稍后再试一次。"
 
 pending_messages = []
 in_flight_messages = []
