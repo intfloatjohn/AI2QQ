@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Secrets and local configurations
+config.json
+*.log
+maid.log
+agent.log
+
+# Dynamic runtime memory and history (do not commit user chat records)
+history.json
+memory_summary.txt
+temp_reply.mp3
+*.mp3
+
+# Operating System files
+.DS_Store
+Thumbs.db
+.Trash-*
+
+# Upstream OneBot binaries (never commit third-party binaries to Git)
+NapCat/
+node_modules/

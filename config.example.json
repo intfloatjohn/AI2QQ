@@ -1,0 +1,16 @@
+{
+  "api_type": "openai",
+  "base_url": "https://openrouter.ai/api/v1/chat/completions",
+  "api_key": "sk-or-v1-...",
+  "model": "google/gemini-3.8-flash",
+  "master_qq": 123456789,
+  "bot_qq": 987654321,
+  "onebot_http_api": "http://127.0.0.1:3000",
+  "poll_interval_sec": 1.2,
+  "debounce_delay_sec": 1.8,
+  "compact_threshold": 14,
+  "compact_keep_recent": 6,
+  "log_level": "INFO",
+  "enable_voice_reply": false,
+  "voice_character": "zh-CN-XiaoyiNeural"
+}

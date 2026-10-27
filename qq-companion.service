@@ -1,0 +1,15 @@
+[Unit]
+Description=QQ AI Companion Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/QQ_AI_Companion
+ExecStart=/opt/QQ_AI_Companion/venv/bin/python3 /opt/QQ_AI_Companion/autonomous_agent.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
