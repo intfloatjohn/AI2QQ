@@ -87,11 +87,16 @@ setup_logging()
 # Bilingual QQ Faces Mapping
 QQ_FACES = {
     # Chinese
-    "贴贴": 201, "摸摸头": 176, "亲亲": 28, "委屈": 21,
-    "害羞": 24, "抱抱": 98, "猫猫": 175, "比心": 212, "微笑": 14,
+    "贴贴": 219, "蹭一蹭": 219, "抱抱": 222, "拥抱": 49,
+    "摸摸头": 219, "害羞": 6, "脸红": 6, "亲亲": 109, "啵啵": 109,
+    "委屈": 106, "可爱": 21, "微笑": 14, "比心": 319, "爱心": 66,
+    "猫猫": 307, "喵喵": 307, "调皮": 12, "眨眼": 172,
+    "呲牙": 13, "偷笑": 20, "流泪": 5, "睡": 8, "期待": 294,
     # English
-    "hug": 98, "pat": 176, "kiss": 28, "pout": 21,
-    "shy": 24, "cuddle": 201, "cat": 175, "heart": 212, "smile": 14
+    "hug": 222, "cuddle": 219, "pat": 219, "shy": 6,
+    "kiss": 109, "pout": 106, "cute": 21, "smile": 14,
+    "heart": 319, "cat": 307, "wink": 172, "laugh": 13,
+    "cry": 5, "sleep": 8
 }
 
 conversation_history = []
@@ -318,12 +323,15 @@ def send_voice_message(text: str):
         temp_audio = os.path.join(BASE_DIR, "temp_reply.mp3")
         success = asyncio.run(synthesize_voice_file(text, temp_audio))
         if success and os.path.exists(temp_audio):
-            norm_path = os.path.abspath(temp_audio).replace('\\', '/')
-            uri = f"file:///{norm_path}" if not norm_path.startswith('/') else f"file://{norm_path}"
-            call_onebot_api("send_private_msg", {
-                "user_id": config["master_qq"],
-                "message": f"[CQ:record,file={uri}]"
-            })
+            try:
+                with open(temp_audio, "rb") as af:
+                    b64_audio = base64.b64encode(af.read()).decode('utf-8')
+                call_onebot_api("send_private_msg", {
+                    "user_id": config["master_qq"],
+                    "message": f"[CQ:record,file=base64://{b64_audio}]"
+                })
+            except Exception as fe:
+                logging.error(f"Failed to encode/send voice: {fe}")
     except Exception as e:
         logging.error(f"Failed to synthesize or send voice: {e}")
 
@@ -339,12 +347,15 @@ def execute_action_tags(reply_text: str):
                     matched_file = os.path.join(STICKERS_DIR, fname)
                     break
         if matched_file and os.path.exists(matched_file):
-            norm_path = os.path.abspath(matched_file).replace('\\', '/')
-            uri = f"file:///{norm_path}" if not norm_path.startswith('/') else f"file://{norm_path}"
-            call_onebot_api("send_private_msg", {
-                "user_id": config["master_qq"],
-                "message": f"[CQ:image,file={uri}]"
-            })
+            try:
+                with open(matched_file, "rb") as img_f:
+                    b64_img = base64.b64encode(img_f.read()).decode('utf-8')
+                call_onebot_api("send_private_msg", {
+                    "user_id": config["master_qq"],
+                    "message": f"[CQ:image,file=base64://{b64_img}]"
+                })
+            except Exception as ie:
+                logging.error(f"Failed to encode/send sticker image: {ie}")
 
     # 2. QQ Faces (Matches [发表情: xxx] and [Send Face: xxx])
     face_matches = re.findall(r'\[(?:发表情|Send Face):\s*([^\]]+)\]', reply_text, re.IGNORECASE)

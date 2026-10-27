@@ -5,12 +5,14 @@ The framework supports inline action tags in AI replies, which are automatically
 ---
 
 ## 1. Native QQ Faces
-- `[Send Face: Hug]` (ID 98)
-- `[Send Face: Pat]` (ID 176)
-- `[Send Face: Kiss]` (ID 28)
-- `[Send Face: Shy]` (ID 24)
+- `[Send Face: Hug]` (ID 222)
+- `[Send Face: Cuddle]` (ID 219)
+- `[Send Face: Kiss]` (ID 109)
+- `[Send Face: Shy]` (ID 6)
+- `[Send Face: Pout]` (ID 106)
 - `[Send Face: Smile]` (ID 14)
-- `[Send Face: Cat]` (ID 175)
+- `[Send Face: Cat]` (ID 307)
+- `[Send Face: Heart]` (ID 319)
 
 ---
 
