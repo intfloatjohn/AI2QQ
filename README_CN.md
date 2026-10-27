@@ -56,8 +56,8 @@ flowchart LR
 ### 2. 安装项目依赖
 ```bash
 # 克隆代码仓库
-git clone https://github.com/your-username/qq-ai-companion.git
-cd qq-ai-companion
+git clone https://github.com/intfloatjohn/AI2QQ.git
+cd AI2QQ
 
 # 安装 Python 依赖
 pip install -r requirements.txt
