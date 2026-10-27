@@ -937,11 +937,12 @@ first_message_time = 0.0
 
 def trigger_generation(gen_id: int):
     """Dispatches accumulated messages for LLM response generation."""
-    global pending_messages, in_flight_messages, first_message_time
+    global pending_messages, in_flight_messages, first_message_time, current_generation_id
     with batch_lock:
         if gen_id != current_generation_id:
             return
         if not pending_messages and not in_flight_messages:
+            current_generation_id = 0
             return
 
         # If previous in_flight_messages were interrupted by newer pending messages,
@@ -960,7 +961,7 @@ def trigger_generation(gen_id: int):
 
 def _worker_generation_thread(batch_to_process: list, gen_id: int):
     """Worker thread executing the generation for a batch with non-destructive interruption."""
-    global in_flight_messages
+    global in_flight_messages, current_generation_id
     try:
         with batch_lock:
             if gen_id != current_generation_id:
@@ -993,6 +994,11 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
                 lines_for_history.append(img_tag_hist)
 
         if not lines_for_llm and not all_images:
+            with batch_lock:
+                if gen_id == current_generation_id:
+                    in_flight_messages.clear()
+                    if not pending_messages:
+                        current_generation_id = 0
             return
 
         if len(lines_for_llm) <= 1:
@@ -1018,6 +1024,11 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
 
         reply = query_llm(user_prompt_for_llm, all_images, gen_id=gen_id)
         if not reply:
+            with batch_lock:
+                if gen_id == current_generation_id:
+                    in_flight_messages.clear()
+                    if not pending_messages:
+                        current_generation_id = 0
             return
 
         with batch_lock:
@@ -1040,12 +1051,20 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
                 "user_id": config["master_qq"],
                 "message": clean_text_reply
             })
+
+        # Re-initialize the race generation counter back to 0 once all active queues are idle
+        with batch_lock:
+            if gen_id == current_generation_id and not pending_messages and not in_flight_messages:
+                logging.info(f"Message batch completed. Re-initialized generation counter from #{current_generation_id} to 0.")
+                current_generation_id = 0
     except Exception as e:
         logging.error(f"Error in batch generation #{gen_id}: {e}")
         traceback.print_exc()
         with batch_lock:
             if gen_id == current_generation_id:
                 in_flight_messages.clear()
+                if not pending_messages:
+                    current_generation_id = 0
 
 def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
     global debounce_timer, current_generation_id, first_message_time
