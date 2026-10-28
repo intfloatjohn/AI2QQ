@@ -207,22 +207,23 @@ docker run -d \
   终端会直接打出 ASCII 格式二维码，手机 QQ 扫描终端二维码即可登录！
 
 ### 启动 AI 伴侣守护进程：
+日常使用推荐直接使用一键脚本：
 ```bash
-chmod +x deploy_debian.sh start_agent.sh
-./deploy_debian.sh
-./start_agent.sh
+chmod +x setup.sh start.sh
+./setup.sh    # 首次自动安装系统环境、Python依赖、预下载TTS语音并配置NapCat
+./start.sh    # 日常运行与服务器重启后的开机启动
 ```
-或直接运行全自动一键脚本 `./setup.sh`，也可配置为 systemd 服务开机自启（参见 `qq-companion.service`）。
+如需配置为 systemd 常驻系统服务，参见项目根目录的 `qq-companion.service`。
 
 ---
 
-## 8. Windows 一键部署与双击运行
+## 11. Windows 一键部署与双击运行
 
 对于 Windows 用户，无需输入任何复杂终端指令：
 
 1. **一键自动安装环境与 NapCat**：
    * 双击运行根目录下的 **`setup_windows.bat`**。
-   * 脚本会自动建立 Python 独立虚拟环境并安装所有依赖。
+   * 脚本会自动建立 Python 独立虚拟环境、安装所有依赖并预热 TTS 语音引擎。
    * 提示安装 NapCat 时，输入 `1` 即可通过 PowerShell 全自动下载并解压官方最新版 NapCatQQ 到 `NapCat/` 文件夹。
 2. **日常启动**：
-   * 在 `config.json` 中配置好 API Key 和 QQ 号后，双击 **`start_agent.bat`** 即可一键启动 AI 伴侣。
+   * 在 `config.json` 中配置好 API Key 和 QQ 号后，双击 **`start.bat`**（或 `start_agent.bat`）即可一键启动 AI 伴侣。

@@ -30,3 +30,4 @@ Thumbs.db
 # Upstream OneBot binaries (never commit third-party binaries to Git)
 NapCat/
 node_modules/
+resume.txt

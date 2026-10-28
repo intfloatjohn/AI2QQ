@@ -55,54 +55,49 @@ flowchart LR
 
 ## 🚀 Quick Start
 
-### 1. Requirements
-* Python 3.9+ (tested up to 3.14)
-* A running OneBot 11 implementation (e.g. [NapCatQQ](https://github.com/NapNeko/NapCatQQ) in Docker or native) (No manual configuration needed; setup scripts configure this automatically)
+Getting started takes just two simple steps:
 
-### 2. Installation
+### Step 1: Automated All-in-One Setup
+Clone the repository and run the setup script:
+
 ```bash
-# Clone the repository
 git clone https://github.com/intfloatjohn/AI2QQ.git
 cd AI2QQ
-
-# Install dependencies
-pip install -r requirements.txt
+chmod +x setup.sh start.sh
+./setup.sh
 ```
 
-### 3. Configuration
-Copy `config.example.json` to `config.json` and configure your credentials:
+`setup.sh` automatically handles **everything** out of the box:
+* 📦 Installs required system packages (`python3`, `python3-venv`, `ffmpeg`, `curl`)
+* 🐍 Sets up a Python virtual environment (`venv/`) and installs all dependencies
+* 🎙️ Pre-caches & verifies the Microsoft Edge Neural TTS voice engine
+* 🔍 Tests live web search connectivity
+* 🐳 Configures & launches the NapCatQQ (OneBot 11) Docker container with terminal ASCII QR code login
+* ⚙️ Initializes `config.json` automatically
+
+> **Note**: Edit `config.json` to configure your `api_key` (OpenRouter / Gemini API Key) and `master_qq` (your QQ number):
 ```json
 {
-  "api_type": "openai",
-  "base_url": "https://openrouter.ai/api/v1/chat/completions",
   "api_key": "YOUR_API_KEY_HERE",
-  "model": "google/gemini-3.8-flash",
   "master_qq": 123456789,
-  "bot_qq": 987654321,
-  "onebot_http_api": "http://127.0.0.1:3000",
-  "language": "zh",
-  "poll_interval_sec": 1.2,
-  "debounce_delay_sec": 1.8,
-  "compact_threshold": 14,
-  "compact_keep_recent": 6,
-  "log_level": "INFO",
-  "enable_voice_reply": false,
-  "voice_character": "zh-CN-XiaoyiNeural"
+  "model": "google/gemini-3.8-flash"
 }
 ```
 
-### 4. Quick Start (One-Click Setup)
+### Step 2: Daily Launch & Restart
+Whenever you reboot your server or restart the bot, simply run:
 
-#### 🐧 Linux (Automated Setup & Launch):
 ```bash
-chmod +x setup.sh start_agent.sh
-./setup.sh
+./start.sh
 ```
-> `setup.sh` automatically detects/installs Docker, pulls the NapCatQQ image, displays the terminal QR code for phone scanning, installs Python dependencies, and launches the AI companion.
+*`start.sh` automatically checks NapCat Docker status, wakes up the container if stopped, activates the virtual environment, and boots the companion daemon.*
 
-#### 🪟 Windows (Double-Click Setup):
-1. Double-click **`setup_windows.bat`**: Automatically initializes the Python venv, installs requirements, and optionally auto-downloads the latest NapCat package into `NapCat/`.
-2. Daily Launch: Once configured, simply double-click **`start_agent.bat`** to run!
+---
+
+#### 🪟 Windows Setup & Daily Launch
+1. **First-time Setup**: Double-click **`setup_windows.bat`** (initializes venv, installs requirements, pre-caches TTS voice, and downloads NapCat).
+2. **Configure**: Fill in your `api_key` and `master_qq` in `config.json`.
+3. **Daily Launch**: Double-click **`start.bat`** (or `start_agent.bat`) anytime!
 
 ---
 

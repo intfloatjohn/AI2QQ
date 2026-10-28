@@ -140,6 +140,12 @@ fi
 # 3. Setup / Activate Python Environment
 if [ -d "venv" ]; then
     source venv/bin/activate
+else
+    echo "[*] Creating Python virtual environment and installing dependencies..."
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install --upgrade pip
+    pip install -r requirements.txt
 fi
 
 # 4. Launch Autonomous Agent Daemon

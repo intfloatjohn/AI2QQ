@@ -53,56 +53,51 @@ flowchart LR
 
 ---
 
-## 🚀 快速上手
+## 🚀 快速上手 (Quick Start)
 
-### 1. 环境准备
-* Python 3.9+ (测试支持至 Python 3.14)
-* 任意运行中的 OneBot 11 客户端（推荐 [NapCatQQ](https://github.com/NapNeko/NapCatQQ)）(无需手动配置，setup会自动配置)
+仅需两步即可极速完成部署与启动：
 
-### 2. 安装项目依赖
+### 第一步：全自动一键配置 (All-in-One Setup)
+克隆项目仓库并运行 `setup.sh`：
+
 ```bash
-# 克隆代码仓库
 git clone https://github.com/intfloatjohn/AI2QQ.git
 cd AI2QQ
-
-# 安装 Python 依赖
-pip install -r requirements.txt
+chmod +x setup.sh start.sh
+./setup.sh
 ```
 
-### 3. 配置参数
-复制 `config.example.json` 为 `config.json`，并填入您的信息：
+`setup.sh` 脚本会为你全自动处理好**所有依赖与运行环境**，无需繁琐的手动配置：
+* 📦 自动检测并安装系统组件（`python3`、`python3-venv`、`ffmpeg` 语音转码库、`curl` 等）
+* 🐍 自动创建 Python 独立虚拟环境（`venv/`）并安装全部依赖
+* 🎙️ 自动连接微软云端预热下载 Edge-TTS 神经网络语音引擎并测试发声
+* 🔍 自动联通并验证实时网络搜索功能
+* 🐳 自动拉取并启动 NapCatQQ (OneBot 11) Docker 容器，直接在终端打印黑白二维码供手机 QQ 扫码登录
+* ⚙️ 自动初始化生成 `config.json` 配置文件
+
+> **提示**：首次配置后，请在 `config.json` 中填入你的大模型 `api_key`（如 OpenRouter / Gemini API Key）以及 `master_qq`（主人的 QQ 号）：
 ```json
 {
-  "api_type": "openai",
-  "base_url": "https://openrouter.ai/api/v1/chat/completions",
-  "api_key": "你的APIKey",
-  "model": "google/gemini-3.8-flash",
+  "api_key": "YOUR_API_KEY_HERE",
   "master_qq": 123456789,
-  "bot_qq": 987654321,
-  "onebot_http_api": "http://127.0.0.1:3000",
-  "language": "zh",
-  "poll_interval_sec": 1.2,
-  "debounce_delay_sec": 1.8,
-  "compact_threshold": 14,
-  "compact_keep_recent": 6,
-  "log_level": "INFO",
-  "enable_voice_reply": false,
-  "voice_character": "zh-CN-XiaoyiNeural"
+  "model": "google/gemini-3.8-flash"
 }
 ```
 
-### 4. 快速启动 (One-Click Setup)
+### 第二步：日常运行与重启 (Daily Launch)
+无论服务器重启还是关闭后台后重新启动，日常只需执行一条命令：
 
-#### 🐧 Linux 用户（一键自动配置与启动）：
 ```bash
-chmod +x setup.sh start_agent.sh
-./setup.sh
+./start.sh
 ```
-> `setup.sh` 会全自动检测/安装 Docker，自动拉取 NapCatQQ 镜像，并在终端直接打印黑白字符扫码登录，随后自动安装 Python 依赖并启动 AI 伴侣！
+*`start.sh` 会全自动检测 NapCat Docker 容器状态（未启动则自动唤醒并校验）、激活虚拟环境并启动 AI 伴侣常驻守护进程。*
 
-#### 🪟 Windows 用户（双击运行）：
-1. 双击运行 **`setup_windows.bat`**：全自动创建虚拟环境、安装依赖、并可一键自动下载 NapCatQQ 运行环境。
-2. 日常启动：配置好 `config.json` 后，双击 **`start_agent.bat`** 即可极速启动！
+---
+
+#### 🪟 Windows 用户使用指南
+1. **首次配置**：双击运行 **`setup_windows.bat`**（全自动初始化虚拟环境、安装依赖、预热 TTS 引擎并一键下载 NapCat）。
+2. **填写配置**：在 `config.json` 填入 `api_key` 与 `master_qq`。
+3. **日常启动**：双击 **`start.bat`**（或 `start_agent.bat`）即可直接启动！
 
 ---
 
