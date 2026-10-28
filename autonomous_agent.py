@@ -85,6 +85,9 @@ config = {
     "prefer_native_file_parser": True,
     "enable_voice_recognition": True,
     "prefer_native_voice_recognition": True,
+    "asr_api_url": "",
+    "asr_api_key": "",
+    "asr_model": "whisper-1",
     "enable_picture_database": True,
     "enable_multi_bubble_reply": True,
     "multi_bubble_delay_sec": 1.2,
@@ -154,6 +157,7 @@ conversation_history = []
 long_term_memory = ""
 processed_message_ids = set()
 recent_bot_replies = deque(maxlen=100)
+last_bot_voice_send_time = 0.0
 memory_lock = threading.Lock()
 
 # Tools definitions for OpenAI function calling
@@ -1021,12 +1025,90 @@ def process_incoming_file(file_id: str, file_name: str = "", file_size: int = 0,
 # ==============================================================================
 # Feature 4: Inbound Voice Recognition (ASR)
 # ==============================================================================
+def transcribe_voice_via_api(audio_path: str) -> str:
+    """Transcribes audio using a configured Whisper-compatible API (SiliconFlow, Groq, OpenAI)."""
+    api_url = config.get("asr_api_url", "").strip()
+    if not api_url:
+        return ""
+    api_key = config.get("asr_api_key", "").strip() or config.get("api_key", "").strip()
+    model = config.get("asr_model", "whisper-1").strip()
+
+    send_path = audio_path
+    created_mp3 = False
+    if not audio_path.lower().endswith((".mp3", ".wav")):
+        mp3_path = audio_path + ".mp3"
+        try:
+            subprocess.run(["ffmpeg", "-y", "-i", audio_path, mp3_path],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            if os.path.exists(mp3_path):
+                send_path = mp3_path
+                created_mp3 = True
+        except Exception as fe:
+            logging.debug(f"Audio conversion for ASR API failed: {fe}")
+
+    try:
+        import requests
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        with open(send_path, "rb") as f:
+            files = {"file": (os.path.basename(send_path), f, "audio/mpeg")}
+            data = {"model": model}
+            logging.info(f"Submitting audio to ASR API ({api_url})...")
+            resp = requests.post(api_url, headers=headers, files=files, data=data, timeout=30)
+            if resp.status_code == 200:
+                res_json = resp.json()
+                text = res_json.get("text", "").strip()
+                if text:
+                    logging.info(f"ASR API transcription succeeded: '{text}'")
+                    return text
+            else:
+                logging.warning(f"ASR API returned status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        logging.warning(f"ASR API request failed: {e}")
+    finally:
+        if created_mp3 and os.path.exists(send_path):
+            try: os.remove(send_path)
+            except Exception: pass
+    return ""
+
 def transcribe_voice_audio(audio_path: str) -> str:
-    """Transcribes an audio file into text using available local/cloud ASR engines."""
+    """Transcribes an audio file into text using available cloud/local ASR engines."""
     if not os.path.exists(audio_path):
         return ""
 
-    # 1. SpeechRecognition with Google / local engine
+    # 1. Configured cloud ASR API (SiliconFlow / Groq / OpenAI Whisper)
+    api_text = transcribe_voice_via_api(audio_path)
+    if api_text:
+        return api_text
+
+    # 2. Local FunASR (SenseVoiceSmall / Paraformer) if installed
+    try:
+        from funasr import AutoModel
+        model = AutoModel(model="iic/SenseVoiceSmall", disable_update=True, device="cpu")
+        res = model.generate(input=audio_path, language="auto", use_itn=True)
+        if res and isinstance(res, list) and "text" in res[0]:
+            from funasr.utils.postprocess_utils import rich_transcription_postprocess
+            t = rich_transcription_postprocess(res[0]["text"]).strip()
+            if t:
+                logging.info(f"Local FunASR transcription: '{t}'")
+                return t
+    except Exception:
+        pass
+
+    # 3. Local Whisper if installed
+    try:
+        import whisper
+        w_model = whisper.load_model("tiny")
+        res = w_model.transcribe(audio_path)
+        text = res.get("text", "").strip()
+        if text:
+            logging.info(f"Local Whisper transcription: '{text}'")
+            return text
+    except Exception:
+        pass
+
+    # 4. SpeechRecognition with Google ASR (if network allows)
     try:
         import speech_recognition as sr
         r = sr.Recognizer()
@@ -1042,24 +1124,15 @@ def transcribe_voice_audio(audio_path: str) -> str:
             with sr.AudioFile(wav_path) as source:
                 audio_data = r.record(source)
                 text = r.recognize_google(audio_data, language="zh-CN")
-                if created_wav and os.path.exists(wav_path):
-                    try: os.remove(wav_path)
-                    except Exception: pass
                 if text:
+                    logging.info(f"SpeechRecognition ASR transcription: '{text}'")
                     return text.strip()
     except Exception as e:
         logging.debug(f"SpeechRecognition ASR not available or error: {e}")
-
-    # 2. Local Whisper if installed
-    try:
-        import whisper
-        w_model = whisper.load_model("tiny")
-        res = w_model.transcribe(audio_path)
-        text = res.get("text", "").strip()
-        if text:
-            return text
-    except Exception:
-        pass
+    finally:
+        if 'created_wav' in locals() and created_wav and os.path.exists(wav_path):
+            try: os.remove(wav_path)
+            except Exception: pass
 
     return ""
 
@@ -1099,9 +1172,19 @@ def process_incoming_voice(file_id: str, file_url: str = "") -> str:
         transcription = transcribe_voice_audio(local_path)
         if transcription:
             return f"[语音消息 (已转文字): \"{transcription}\"]"
-        return f"[语音消息 (收到音频: {os.path.basename(local_path)})]"
 
-    return "（收到一条语音消息）"
+        # Diagnostic annotation when transcription is not available:
+        model_name = config.get("model", "pure-text")
+        if any(m in model_name.lower() for m in ["gemini", "gpt-4o", "omni"]):
+            return f"[语音消息: 收到用户发送的语音 ({os.path.basename(local_path)})。提示：当前模型支持多模态，请结合对话上下文自然回复]"
+
+        return (
+            f"[语音消息: 收到用户发送的语音 ({os.path.basename(local_path)})。"
+            f"系统提示：当前配置的模型为纯文本模型 ({model_name})，且后台暂未配置可用的 ASR 语音识别服务（可在 config.json 配置 asr_api_url）。"
+            f"请在回复中以拟人化口吻告知主人目前由于在纯文本环境无法收听语音内容，建议主人发文字交流]"
+        )
+
+    return "（收到一条语音消息，但音频文件获取失败）"
 
 # ==============================================================================
 # Comprehensive Incoming Message Parser (Super Emojis, GIFs, Forwards, Files, Voice)
@@ -1227,8 +1310,9 @@ STICKER_ALIASES = {
     "pout": ["委屈", "生气", "撒娇", "pout", "angry"],
 }
 
-async def synthesize_voice_file(text: str, output_path: str):
+async def synthesize_voice_file(text: str, output_path: str) -> bool:
     if not EDGE_TTS_AVAILABLE:
+        logging.warning("edge-tts is not installed in Python environment!")
         return False
     lang = config.get("language", "zh").lower()
     configured_voice = config.get("voice_character", "")
@@ -1236,32 +1320,109 @@ async def synthesize_voice_file(text: str, output_path: str):
         voice = "en-US-JennyNeural"
     else:
         voice = configured_voice or "zh-CN-XiaoyiNeural"
+
     clean_txt = clean_tags(text)
+    clean_txt = re.sub(r'[*_#`~]', '', clean_txt)
+    clean_txt = re.sub(r'\[SEP\]', ' ', clean_txt).strip()
     if not clean_txt:
+        logging.warning("Empty text for voice synthesis after cleaning.")
         return False
-    communicate = edge_tts.Communicate(clean_txt, voice)
-    await communicate.save(output_path)
-    return True
+
+    try:
+        logging.info(f"Synthesizing voice with Edge-TTS (voice={voice}): '{clean_txt[:40]}...'")
+        communicate = edge_tts.Communicate(clean_txt, voice)
+        await asyncio.wait_for(communicate.save(output_path), timeout=25.0)
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            logging.info(f"Edge-TTS synthesis complete: {output_path} ({os.path.getsize(output_path)} bytes)")
+            return True
+        else:
+            logging.error(f"Edge-TTS produced empty audio at {output_path}")
+            return False
+    except asyncio.TimeoutError:
+        logging.error("Edge-TTS synthesis timed out after 25 seconds.")
+        return False
+    except Exception as e:
+        logging.error(f"Edge-TTS communicate.save error: {e}")
+        return False
 
 def send_voice_message(text: str):
+    global last_bot_voice_send_time
     if not EDGE_TTS_AVAILABLE:
-        logging.warning("edge-tts is not installed. Voice synthesis skipped.")
+        logging.warning("edge-tts is not installed. Voice synthesis skipped. Run 'pip install edge-tts'.")
         return
     try:
         temp_audio = os.path.join(BASE_DIR, "temp_reply.mp3")
         success = asyncio.run(synthesize_voice_file(text, temp_audio))
-        if success and os.path.exists(temp_audio):
+        if not success or not os.path.exists(temp_audio) or os.path.getsize(temp_audio) == 0:
+            logging.error(f"Voice synthesis failed or generated empty audio for: '{text[:40]}...'")
+            return
+
+        with open(temp_audio, "rb") as af:
+            raw_audio_bytes = af.read()
+            b64_audio = base64.b64encode(raw_audio_bytes).decode('utf-8')
+
+        target_qq = config["master_qq"]
+        logging.info(f"Dispatching voice message ({len(raw_audio_bytes)} bytes) to QQ {target_qq}...")
+
+        # Update voice send timestamp & recent replies to avoid single-account echo loop
+        last_bot_voice_send_time = time.time()
+        recent_bot_replies.append(text.strip())
+        recent_bot_replies.append(f"[语音消息: \"{text.strip()}\"]")
+        recent_bot_replies.append(f"[语音消息 (已转文字): \"{text.strip()}\"]")
+
+        res = None
+
+        # Method 1: OneBot 11 Standard Segment Array Format (Base64)
+        try:
+            res = call_onebot_api("send_private_msg", {
+                "user_id": target_qq,
+                "message": [
+                    {
+                        "type": "record",
+                        "data": {
+                            "file": f"base64://{b64_audio}"
+                        }
+                    }
+                ]
+            })
+        except Exception as e1:
+            logging.warning(f"Voice send Method 1 (base64 segment) error: {e1}")
+
+        # Method 2: Container shared volume path (/opt/napcat/qq -> /app/.config/QQ)
+        if (not res or res.get("status") != "ok") and os.path.exists("/opt/napcat/qq"):
+            shared_target = "/opt/napcat/qq/napcat_temp_voice.mp3"
             try:
-                with open(temp_audio, "rb") as af:
-                    b64_audio = base64.b64encode(af.read()).decode('utf-8')
-                call_onebot_api("send_private_msg", {
-                    "user_id": config["master_qq"],
+                shutil.copyfile(temp_audio, shared_target)
+                res = call_onebot_api("send_private_msg", {
+                    "user_id": target_qq,
+                    "message": [
+                        {
+                            "type": "record",
+                            "data": {
+                                "file": "file:///app/.config/QQ/napcat_temp_voice.mp3"
+                            }
+                        }
+                    ]
+                })
+            except Exception as e2:
+                logging.warning(f"Voice send Method 2 (container file) error: {e2}")
+
+        # Method 3: CQ Code String Fallback
+        if not res or res.get("status") != "ok":
+            try:
+                res = call_onebot_api("send_private_msg", {
+                    "user_id": target_qq,
                     "message": f"[CQ:record,file=base64://{b64_audio}]"
                 })
-            except Exception as fe:
-                logging.error(f"Failed to encode/send voice: {fe}")
+            except Exception as e3:
+                logging.warning(f"Voice send Method 3 (CQ string) error: {e3}")
+
+        if res and res.get("status") == "ok":
+            logging.info(f"Voice message successfully dispatched to QQ {target_qq}! (OneBot: {res})")
+        else:
+            logging.error(f"Failed to dispatch voice message to QQ {target_qq}. OneBot response: {res}")
     except Exception as e:
-        logging.error(f"Failed to synthesize/send voice: {e}")
+        logging.error(f"Failed to synthesize/send voice: {e}", exc_info=True)
 
 def execute_action_tags(reply_text: str):
     # 1. Custom Stickers (Supports [sticker: heart], [Sticker: heart], [Send Sticker: heart], [发贴图: heart])
@@ -1821,6 +1982,10 @@ def is_bot_echo(text: str) -> bool:
     """Checks if a received message is an echo of the bot's own recent replies."""
     clean = text.strip()
     if not clean:
+        return True
+    # If a voice message is received right after bot sent voice, it's a single-account self echo
+    if "[语音消息" in clean and (time.time() - last_bot_voice_send_time < 4.0):
+        logging.info("Discarding echoed voice message from bot's own recent voice dispatch.")
         return True
     for r in list(recent_bot_replies):
         if not r:
