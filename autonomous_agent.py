@@ -50,6 +50,12 @@ except ImportError:
     EDGE_TTS_AVAILABLE = False
 
 try:
+    from graiax import silkcoder
+    SILKCODER_AVAILABLE = True
+except ImportError:
+    SILKCODER_AVAILABLE = False
+
+try:
     import pilk
     PILK_AVAILABLE = True
 except ImportError:
@@ -1143,7 +1149,20 @@ def transcribe_voice_audio(audio_path: str) -> str:
 
     # Check if incoming audio is Silk v3 format (QQ native voice)
     decoded_wav_path = None
-    if PILK_AVAILABLE:
+    if SILKCODER_AVAILABLE:
+        try:
+            with open(audio_path, "rb") as test_f:
+                header = test_f.read(12)
+            if b"#!SILK_V3" in header:
+                wav_tmp = audio_path + ".decoded.wav"
+                silkcoder.decode(audio_path, wav_tmp)
+                if os.path.exists(wav_tmp) and os.path.getsize(wav_tmp) > 0:
+                    decoded_wav_path = wav_tmp
+                    audio_path = wav_tmp
+                    logging.info(f"Successfully decoded Tencent Silk voice to WAV via silkcoder: {wav_tmp}")
+        except Exception as sde:
+            logging.debug(f"silkcoder decode check failed: {sde}")
+    elif PILK_AVAILABLE:
         try:
             with open(audio_path, "rb") as test_f:
                 header = test_f.read(12)
@@ -1451,31 +1470,42 @@ async def synthesize_voice_file(text: str, output_path: str) -> bool:
 
 def transcode_to_silk(input_audio_path: str, output_silk_path: str) -> bool:
     """Encodes an audio file (MP3/WAV) to genuine Tencent SILK v3 with magic header \x02#!SILK_V3."""
-    if not PILK_AVAILABLE:
-        return False
-    try:
-        pcm_path = input_audio_path + ".temp.pcm"
-        sample_rate = 24000
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", input_audio_path,
-            "-vn",
-            "-ar", str(sample_rate),
-            "-ac", "1",
-            "-f", "s16le",
-            pcm_path
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-        if res.returncode == 0 and os.path.exists(pcm_path):
-            pilk.encode(pcm_path, output_silk_path, pcm_rate=sample_rate, tencent=True)
-            if os.path.exists(pcm_path):
-                try: os.remove(pcm_path)
-                except Exception: pass
+    # Method 1: graiax-silkcoder (precompiled wheels on Linux & Windows)
+    if SILKCODER_AVAILABLE:
+        try:
+            silkcoder.encode(input_audio_path, output_silk_path)
             if os.path.exists(output_silk_path) and os.path.getsize(output_silk_path) > 0:
-                logging.info(f"Audio successfully transcoded to Tencent Silk v3: {output_silk_path} ({os.path.getsize(output_silk_path)} bytes)")
+                logging.info(f"Audio encoded to Silk v3 via graiax-silkcoder: {output_silk_path} ({os.path.getsize(output_silk_path)} bytes)")
                 return True
-    except Exception as e:
-        logging.warning(f"Silk transcoding error (falling back): {e}")
+        except Exception as ge:
+            logging.debug(f"graiax-silkcoder encode failed: {ge}")
+
+    # Method 2: pilk (ffmpeg -> s16le PCM -> pilk.encode with Tencent header)
+    if PILK_AVAILABLE:
+        try:
+            pcm_path = input_audio_path + ".temp.pcm"
+            sample_rate = 24000
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", input_audio_path,
+                "-vn",
+                "-ar", str(sample_rate),
+                "-ac", "1",
+                "-f", "s16le",
+                pcm_path
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            if res.returncode == 0 and os.path.exists(pcm_path):
+                pilk.encode(pcm_path, output_silk_path, pcm_rate=sample_rate, tencent=True)
+                if os.path.exists(pcm_path):
+                    try: os.remove(pcm_path)
+                    except Exception: pass
+                if os.path.exists(output_silk_path) and os.path.getsize(output_silk_path) > 0:
+                    logging.info(f"Audio successfully transcoded to Tencent Silk v3 via pilk: {output_silk_path} ({os.path.getsize(output_silk_path)} bytes)")
+                    return True
+        except Exception as pe:
+            logging.debug(f"pilk encode failed: {pe}")
+
     return False
 
 def transcode_to_wav(input_audio_path: str, output_wav_path: str) -> bool:
@@ -1502,6 +1532,11 @@ def send_voice_message(text: str):
     if not EDGE_TTS_AVAILABLE:
         logging.warning("edge-tts is not installed. Voice synthesis skipped. Run 'pip install edge-tts'.")
         return
+
+    is_self_chat = str(config.get("bot_qq", "")) == str(config.get("master_qq", ""))
+    if is_self_chat:
+        logging.warning("[!] Warning: Single-account self-chat mode (bot_qq == master_qq). Tencent QQ restricts accounts from receiving voice messages sent to themselves. Please use two separate QQ accounts (bot_qq != master_qq) to receive voice bubbles on QQ.")
+
     temp_audio = os.path.join(BASE_DIR, "temp_reply.mp3")
     silk_path = os.path.join(BASE_DIR, "temp_reply.silk")
     wav_path = os.path.join(BASE_DIR, "temp_reply.wav")
@@ -1558,7 +1593,17 @@ def send_voice_message(text: str):
             except Exception as e1:
                 logging.warning(f"Voice send Strategy 1 (container file) error: {e1}")
 
-        # Strategy 2: OneBot 11 Standard Segment Array Format with Base64 & explicit file name
+        # Strategy 2: CQ Code String Format (the exact proven method from Gemini_as_catgirl)
+        if not res or res.get("status") != "ok":
+            try:
+                res = call_onebot_api("send_private_msg", {
+                    "user_id": target_qq,
+                    "message": f"[CQ:record,file=base64://{b64_audio}]"
+                })
+            except Exception as e2:
+                logging.warning(f"Voice send Strategy 2 (CQ string) error: {e2}")
+
+        # Strategy 3: OneBot 11 Standard Segment Array Format with Base64 & explicit file name
         if not res or res.get("status") != "ok":
             try:
                 res = call_onebot_api("send_private_msg", {
@@ -1574,18 +1619,8 @@ def send_voice_message(text: str):
                         }
                     ]
                 })
-            except Exception as e2:
-                logging.warning(f"Voice send Strategy 2 (base64 segment) error: {e2}")
-
-        # Strategy 3: CQ Code String Fallback
-        if not res or res.get("status") != "ok":
-            try:
-                res = call_onebot_api("send_private_msg", {
-                    "user_id": target_qq,
-                    "message": f"[CQ:record,file=base64://{b64_audio}]"
-                })
             except Exception as e3:
-                logging.warning(f"Voice send Strategy 3 (CQ string) error: {e3}")
+                logging.warning(f"Voice send Strategy 3 (base64 segment) error: {e3}")
 
         if res and res.get("status") == "ok":
             logging.info(f"Voice message successfully dispatched to QQ {target_qq}! (Format: {file_name}, OneBot: {res})")

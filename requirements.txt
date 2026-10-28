@@ -13,3 +13,4 @@ pypdf>=3.0.0
 python-docx>=0.8.11
 SpeechRecognition>=3.10.0
 pilk>=0.1.0
+graiax-silkcoder>=0.3.3
