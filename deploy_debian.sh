@@ -3,7 +3,7 @@ set -e
 
 echo "=== [1/3] Installing system packages on Debian ==="
 sudo apt-get update
-sudo apt-get install -y python3 python3-pip python3-venv curl wget jq screen ffmpeg
+sudo apt-get install -y python3 python3-pip python3-venv curl wget jq screen ffmpeg build-essential python3-dev
 
 echo "=== [2/3] Setting up Python venv ==="
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

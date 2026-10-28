@@ -12,3 +12,4 @@ pillow>=9.0.0
 pypdf>=3.0.0
 python-docx>=0.8.11
 SpeechRecognition>=3.10.0
+pilk>=0.1.0

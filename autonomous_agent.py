@@ -31,6 +31,7 @@ import threading
 import subprocess
 import hashlib
 import zipfile
+import shutil
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -47,6 +48,12 @@ try:
     EDGE_TTS_AVAILABLE = True
 except ImportError:
     EDGE_TTS_AVAILABLE = False
+
+try:
+    import pilk
+    PILK_AVAILABLE = True
+except ImportError:
+    PILK_AVAILABLE = False
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1083,7 +1090,11 @@ def transcribe_voice_via_api(audio_path: str) -> str:
     api_url = config.get("asr_api_url", "").strip()
     if not api_url:
         return ""
-    api_key = config.get("asr_api_key", "").strip() or config.get("api_key", "").strip()
+    api_key = config.get("asr_api_key", "").strip()
+    if not api_key:
+        main_base = config.get("base_url", "")
+        if urllib.parse.urlparse(api_url).netloc == urllib.parse.urlparse(main_base).netloc:
+            api_key = config.get("api_key", "").strip()
     model = config.get("asr_model", "whisper-1").strip()
 
     send_path = audio_path
@@ -1130,61 +1141,101 @@ def transcribe_voice_audio(audio_path: str) -> str:
     if not os.path.exists(audio_path):
         return ""
 
-    # 1. Configured cloud ASR API (SiliconFlow / Groq / OpenAI Whisper)
-    api_text = transcribe_voice_via_api(audio_path)
-    if api_text:
-        return api_text
+    # Check if incoming audio is Silk v3 format (QQ native voice)
+    decoded_wav_path = None
+    if PILK_AVAILABLE:
+        try:
+            with open(audio_path, "rb") as test_f:
+                header = test_f.read(12)
+            if b"#!SILK_V3" in header:
+                pcm_tmp = audio_path + ".decoded.pcm"
+                wav_tmp = audio_path + ".decoded.wav"
+                pilk.decode(audio_path, pcm_tmp)
+                res = subprocess.run(
+                    ["ffmpeg", "-y", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", pcm_tmp, wav_tmp],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
+                )
+                if os.path.exists(pcm_tmp):
+                    try: os.remove(pcm_tmp)
+                    except Exception: pass
+                if res.returncode == 0 and os.path.exists(wav_tmp):
+                    decoded_wav_path = wav_tmp
+                    audio_path = wav_tmp
+                    logging.info(f"Successfully decoded Tencent Silk voice to WAV: {wav_tmp}")
+        except Exception as se:
+            logging.debug(f"Incoming Silk decode check failed: {se}")
 
-    # 2. Local FunASR (SenseVoiceSmall / Paraformer) if installed
     try:
-        from funasr import AutoModel
-        model = AutoModel(model="iic/SenseVoiceSmall", disable_update=True, device="cpu")
-        res = model.generate(input=audio_path, language="auto", use_itn=True)
-        if res and isinstance(res, list) and "text" in res[0]:
-            from funasr.utils.postprocess_utils import rich_transcription_postprocess
-            t = rich_transcription_postprocess(res[0]["text"]).strip()
-            if t:
-                logging.info(f"Local FunASR transcription: '{t}'")
-                return t
-    except Exception:
-        pass
+        # 1. Configured cloud ASR API (SiliconFlow SenseVoice / Groq / OpenAI Whisper)
+        api_text = transcribe_voice_via_api(audio_path)
+        if api_text:
+            return api_text
 
-    # 3. Local Whisper if installed
-    try:
-        import whisper
-        w_model = whisper.load_model("tiny")
-        res = w_model.transcribe(audio_path)
-        text = res.get("text", "").strip()
-        if text:
-            logging.info(f"Local Whisper transcription: '{text}'")
-            return text
-    except Exception:
-        pass
+        # 2. Local FunASR (SenseVoiceSmall / Paraformer) if installed
+        try:
+            from funasr import AutoModel
+            model = AutoModel(model="iic/SenseVoiceSmall", disable_update=True, device="cpu")
+            res = model.generate(input=audio_path, language="auto", use_itn=True)
+            if res and isinstance(res, list) and "text" in res[0]:
+                from funasr.utils.postprocess_utils import rich_transcription_postprocess
+                t = rich_transcription_postprocess(res[0]["text"]).strip()
+                if t:
+                    logging.info(f"Local FunASR transcription: '{t}'")
+                    return t
+        except Exception:
+            pass
 
-    # 4. SpeechRecognition with Google ASR (if network allows)
-    try:
-        import speech_recognition as sr
-        r = sr.Recognizer()
-        wav_path = audio_path
-        created_wav = False
-        if not audio_path.lower().endswith(".wav"):
-            wav_path = audio_path + ".wav"
-            subprocess.run(["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", wav_path],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-            created_wav = True
+        # 3. Local Whisper if installed
+        try:
+            import whisper
+            w_model = whisper.load_model("tiny")
+            res = w_model.transcribe(audio_path)
+            text = res.get("text", "").strip()
+            if text:
+                logging.info(f"Local Whisper transcription: '{text}'")
+                return text
+        except Exception:
+            pass
 
-        if os.path.exists(wav_path):
-            with sr.AudioFile(wav_path) as source:
-                audio_data = r.record(source)
-                text = r.recognize_google(audio_data, language="zh-CN")
-                if text:
-                    logging.info(f"SpeechRecognition ASR transcription: '{text}'")
-                    return text.strip()
-    except Exception as e:
-        logging.debug(f"SpeechRecognition ASR not available or error: {e}")
+        # 4. SpeechRecognition with Google ASR (Guarded with 3.0s timeout to prevent 120s hanging in China)
+        lang = config.get("language", "zh").lower()
+        if lang != "zh" or config.get("enable_google_asr", False):
+            try:
+                import speech_recognition as sr
+                r = sr.Recognizer()
+                wav_path = audio_path
+                created_wav = False
+                if not audio_path.lower().endswith(".wav"):
+                    wav_path = audio_path + ".temp.wav"
+                    subprocess.run(["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", wav_path],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                    created_wav = True
+
+                if os.path.exists(wav_path):
+                    with sr.AudioFile(wav_path) as source:
+                        audio_data = r.record(source)
+                        sr_result = []
+                        def _recognize():
+                            try:
+                                sr_result.append(r.recognize_google(audio_data, language="zh-CN" if lang == "zh" else "en-US"))
+                            except Exception:
+                                pass
+                        t_sr = threading.Thread(target=_recognize, daemon=True)
+                        t_sr.start()
+                        t_sr.join(timeout=3.0)
+                        if sr_result and sr_result[0]:
+                            text = sr_result[0].strip()
+                            logging.info(f"SpeechRecognition ASR transcription: '{text}'")
+                            return text
+            except Exception as e:
+                logging.debug(f"SpeechRecognition ASR error: {e}")
+            finally:
+                if 'created_wav' in locals() and created_wav and os.path.exists(wav_path):
+                    try: os.remove(wav_path)
+                    except Exception: pass
     finally:
-        if 'created_wav' in locals() and created_wav and os.path.exists(wav_path):
-            try: os.remove(wav_path)
+        if decoded_wav_path and os.path.exists(decoded_wav_path):
+            try: os.remove(decoded_wav_path)
             except Exception: pass
 
     return ""
@@ -1398,24 +1449,84 @@ async def synthesize_voice_file(text: str, output_path: str) -> bool:
         logging.error(f"Edge-TTS communicate.save error: {e}")
         return False
 
+def transcode_to_silk(input_audio_path: str, output_silk_path: str) -> bool:
+    """Encodes an audio file (MP3/WAV) to genuine Tencent SILK v3 with magic header \x02#!SILK_V3."""
+    if not PILK_AVAILABLE:
+        return False
+    try:
+        pcm_path = input_audio_path + ".temp.pcm"
+        sample_rate = 24000
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_audio_path,
+            "-vn",
+            "-ar", str(sample_rate),
+            "-ac", "1",
+            "-f", "s16le",
+            pcm_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        if res.returncode == 0 and os.path.exists(pcm_path):
+            pilk.encode(pcm_path, output_silk_path, pcm_rate=sample_rate, tencent=True)
+            if os.path.exists(pcm_path):
+                try: os.remove(pcm_path)
+                except Exception: pass
+            if os.path.exists(output_silk_path) and os.path.getsize(output_silk_path) > 0:
+                logging.info(f"Audio successfully transcoded to Tencent Silk v3: {output_silk_path} ({os.path.getsize(output_silk_path)} bytes)")
+                return True
+    except Exception as e:
+        logging.warning(f"Silk transcoding error (falling back): {e}")
+    return False
+
+def transcode_to_wav(input_audio_path: str, output_wav_path: str) -> bool:
+    """Converts audio to 24000Hz 16-bit mono WAV as fallback for NapCat."""
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_audio_path,
+            "-vn",
+            "-ar", "24000",
+            "-ac", "1",
+            output_wav_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        if res.returncode == 0 and os.path.exists(output_wav_path) and os.path.getsize(output_wav_path) > 0:
+            logging.info(f"Audio transcoded to 24000Hz mono WAV: {output_wav_path} ({os.path.getsize(output_wav_path)} bytes)")
+            return True
+    except Exception as e:
+        logging.warning(f"WAV transcoding error: {e}")
+    return False
+
 def send_voice_message(text: str):
     global last_bot_voice_send_time
     if not EDGE_TTS_AVAILABLE:
         logging.warning("edge-tts is not installed. Voice synthesis skipped. Run 'pip install edge-tts'.")
         return
+    temp_audio = os.path.join(BASE_DIR, "temp_reply.mp3")
+    silk_path = os.path.join(BASE_DIR, "temp_reply.silk")
+    wav_path = os.path.join(BASE_DIR, "temp_reply.wav")
     try:
-        temp_audio = os.path.join(BASE_DIR, "temp_reply.mp3")
         success = asyncio.run(synthesize_voice_file(text, temp_audio))
         if not success or not os.path.exists(temp_audio) or os.path.getsize(temp_audio) == 0:
             logging.error(f"Voice synthesis failed or generated empty audio for: '{text[:40]}...'")
             return
 
-        with open(temp_audio, "rb") as af:
+        audio_to_send = temp_audio
+        file_name = "voice.mp3"
+
+        if transcode_to_silk(temp_audio, silk_path):
+            audio_to_send = silk_path
+            file_name = "voice.silk"
+        elif transcode_to_wav(temp_audio, wav_path):
+            audio_to_send = wav_path
+            file_name = "voice.wav"
+
+        with open(audio_to_send, "rb") as af:
             raw_audio_bytes = af.read()
             b64_audio = base64.b64encode(raw_audio_bytes).decode('utf-8')
 
         target_qq = config["master_qq"]
-        logging.info(f"Dispatching voice message ({len(raw_audio_bytes)} bytes) to QQ {target_qq}...")
+        logging.info(f"Dispatching voice message ({file_name}, {len(raw_audio_bytes)} bytes) to QQ {target_qq}...")
 
         # Update voice send timestamp & recent replies to avoid single-account echo loop
         last_bot_voice_send_time = time.time()
@@ -1424,43 +1535,49 @@ def send_voice_message(text: str):
         recent_bot_replies.append(f"[语音消息 (已转文字): \"{text.strip()}\"]")
 
         res = None
+        ext = os.path.splitext(file_name)[1].lstrip(".") or "mp3"
 
-        # Method 1: OneBot 11 Standard Segment Array Format (Base64)
-        try:
-            res = call_onebot_api("send_private_msg", {
-                "user_id": target_qq,
-                "message": [
-                    {
-                        "type": "record",
-                        "data": {
-                            "file": f"base64://{b64_audio}"
-                        }
-                    }
-                ]
-            })
-        except Exception as e1:
-            logging.warning(f"Voice send Method 1 (base64 segment) error: {e1}")
-
-        # Method 2: Container shared volume path (/opt/napcat/qq -> /app/.config/QQ)
-        if (not res or res.get("status") != "ok") and os.path.exists("/opt/napcat/qq"):
-            shared_target = "/opt/napcat/qq/napcat_temp_voice.mp3"
+        # Strategy 1: Container shared volume path (/opt/napcat/qq -> /app/.config/QQ)
+        # Bypasses base64 memory overhead and allows NapCat to read file directly
+        if os.path.exists("/opt/napcat/qq"):
+            shared_target = f"/opt/napcat/qq/napcat_temp_voice.{ext}"
             try:
-                shutil.copyfile(temp_audio, shared_target)
+                shutil.copyfile(audio_to_send, shared_target)
                 res = call_onebot_api("send_private_msg", {
                     "user_id": target_qq,
                     "message": [
                         {
                             "type": "record",
                             "data": {
-                                "file": "file:///app/.config/QQ/napcat_temp_voice.mp3"
+                                "file": f"file:///app/.config/QQ/napcat_temp_voice.{ext}",
+                                "magic": 0
+                            }
+                        }
+                    ]
+                })
+            except Exception as e1:
+                logging.warning(f"Voice send Strategy 1 (container file) error: {e1}")
+
+        # Strategy 2: OneBot 11 Standard Segment Array Format with Base64 & explicit file name
+        if not res or res.get("status") != "ok":
+            try:
+                res = call_onebot_api("send_private_msg", {
+                    "user_id": target_qq,
+                    "message": [
+                        {
+                            "type": "record",
+                            "data": {
+                                "file": f"base64://{b64_audio}",
+                                "name": file_name,
+                                "magic": 0
                             }
                         }
                     ]
                 })
             except Exception as e2:
-                logging.warning(f"Voice send Method 2 (container file) error: {e2}")
+                logging.warning(f"Voice send Strategy 2 (base64 segment) error: {e2}")
 
-        # Method 3: CQ Code String Fallback
+        # Strategy 3: CQ Code String Fallback
         if not res or res.get("status") != "ok":
             try:
                 res = call_onebot_api("send_private_msg", {
@@ -1468,14 +1585,19 @@ def send_voice_message(text: str):
                     "message": f"[CQ:record,file=base64://{b64_audio}]"
                 })
             except Exception as e3:
-                logging.warning(f"Voice send Method 3 (CQ string) error: {e3}")
+                logging.warning(f"Voice send Strategy 3 (CQ string) error: {e3}")
 
         if res and res.get("status") == "ok":
-            logging.info(f"Voice message successfully dispatched to QQ {target_qq}! (OneBot: {res})")
+            logging.info(f"Voice message successfully dispatched to QQ {target_qq}! (Format: {file_name}, OneBot: {res})")
         else:
             logging.error(f"Failed to dispatch voice message to QQ {target_qq}. OneBot response: {res}")
     except Exception as e:
         logging.error(f"Failed to synthesize/send voice: {e}", exc_info=True)
+    finally:
+        for p in [temp_audio, silk_path, wav_path]:
+            if p and os.path.exists(p):
+                try: os.remove(p)
+                except Exception: pass
 
 def execute_action_tags(reply_text: str):
     # 1. Custom Stickers (Supports [sticker: heart], [Sticker: heart], [Send Sticker: heart], [发贴图: heart])
@@ -1532,13 +1654,13 @@ def execute_action_tags(reply_text: str):
     # 3. Voice Message (Supports [voice: text], [Voice: text], [Send Voice: text], [发语音: text])
     voice_matches = re.findall(r'\[(?:发语音|Send Voice|Voice|voice):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
     for v_text in voice_matches:
-        send_voice_message(v_text)
+        threading.Thread(target=send_voice_message, args=[v_text], daemon=True).start()
 
     # 4. Global Voice Mode
     if config.get("enable_voice_reply", False) and not voice_matches:
         clean_msg = clean_tags(reply_text)
         if clean_msg:
-            send_voice_message(clean_msg)
+            threading.Thread(target=send_voice_message, args=[clean_msg], daemon=True).start()
 
     # 5. Interactivity: Pokes & Likes (Supports [poke], [Poke], [Interact: Poke], [like], [Like], [Interact: Like])
     if re.search(r'\[(?:互动|Interact|interact):\s*(?:戳一戳|Poke|poke)\]|\[(?:poke|Poke)\]', reply_text, re.IGNORECASE):
@@ -2016,18 +2138,13 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
 
 def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
     global debounce_timer, current_generation_id, first_message_time
-    if msg_id in processed_message_ids:
-        return
-    processed_message_ids.add(msg_id)
-    if len(processed_message_ids) > 10000:
-        processed_message_ids.difference_update(list(processed_message_ids)[:-5000])
 
     is_self_chat = str(config.get("bot_qq", "")) == str(config.get("master_qq", ""))
     if not is_self_chat and sender_id != config["master_qq"]:
         return
 
     clean_text, images_b64, has_voice = parse_incoming_cq_content(raw_text, sender_id=sender_id)
-    now_str = datetime.now().strftime("%H:%M:%S")
+    now_str = datetime.datetime.now().strftime("%H:%M:%S")
     logging.info(f"Incoming message [{now_str}] (MsgID: {msg_id}) from {sender_id}: {clean_text[:120]}")
 
     with batch_lock:
@@ -2072,10 +2189,9 @@ def is_bot_echo(text: str) -> bool:
         r_clean = r.strip()
         if clean == r_clean:
             return True
-        if len(clean) >= 4 and (clean in r_clean or r_clean in clean):
-            return True
-        if len(r_clean) >= 4 and (clean[:12] in r_clean or r_clean[:12] in clean):
-            return True
+        if len(clean) >= 15 and len(r_clean) >= 15:
+            if clean[:20] == r_clean[:20] or clean[-20:] == r_clean[-20:]:
+                return True
     return False
 
 def extract_full_message_text(m: dict) -> str:
@@ -2166,19 +2282,27 @@ def poll_messages_loop():
                     sender_id = m.get("sender", {}).get("user_id")
                     text = extract_full_message_text(m)
                     if mid and mid not in processed_message_ids:
+                        processed_message_ids.add(mid)
+                        if len(processed_message_ids) > 10000:
+                            processed_message_ids.difference_update(list(processed_message_ids)[:-5000])
+
                         if is_self_chat:
                             # In self-chat mode, ignore messages matching recent bot replies to prevent infinite echo
                             if is_bot_echo(text):
-                                processed_message_ids.add(mid)
                                 continue
-                            on_message_arrived(mid, sender_id or config["master_qq"], text)
+                            threading.Thread(
+                                target=on_message_arrived,
+                                args=(mid, sender_id or config["master_qq"], text),
+                                daemon=True
+                            ).start()
                         else:
                             # Standard two-account mode (like Gemini_as_catgirl)
                             if sender_id == config["master_qq"]:
-                                on_message_arrived(mid, sender_id, text)
-                            else:
-                                # Mark bot's own sent messages as processed
-                                processed_message_ids.add(mid)
+                                threading.Thread(
+                                    target=on_message_arrived,
+                                    args=(mid, sender_id, text),
+                                    daemon=True
+                                ).start()
         except Exception as e:
             logging.warning(f"Poll loop exception: {e}")
         time.sleep(config.get("poll_interval_sec", 0.8))

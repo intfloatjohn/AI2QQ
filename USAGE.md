@@ -108,25 +108,37 @@
 
 ---
 
-## 7. 语音收发（Voice / TTS）功能指南
+## 7. 语音收发（Voice / TTS / ASR）功能指南
 
-### 5.1 语音发送 (TTS)
-系统内置了基于微软高质量云端语音引擎（`edge-tts`）的真实语音生成能力，纯 Python 运行，不消耗本机显卡/算力：
+### 7.1 语音发送 (TTS)
+系统内置了基于微软高质量云端语音引擎（`edge-tts`）的真实语音生成能力，纯 Python 运行，不消耗本机显卡/算力，并深度兼容手机 QQ（NTQQ）的原生语音气泡播放：
 1. **安装依赖**：
    ```bash
-   pip install edge-tts
+   pip install edge-tts pilk
    ```
+   * **手机端播放关键（Silk v3）**：手机 QQ 客户端原生要求语音为腾讯 Silk v3 格式。项目内置了 `pilk` 转码链路，自动将 Edge-TTS 的 MP3 音频转码为带 `\x02#!SILK_V3` 头的原生 Silk 格式，并优先通过容器共享目录映射派发，确保 iOS 和 Android 手机 QQ 都能 100% 清晰顺畅播放，绝不无声！
 2. **两种发送方式**：
    * **标签触发**：AI 回复中带有 `[发语音: 想听我的声音吗？]` 时，程序会自动合成并作为真实的 QQ 语音条发出。
    * **全自动语音模式**：在 `config.json` 中设置 `"enable_voice_reply": true`，AI 的每一句回复都将自动朗读并发送真实语音条！
 3. **音色调整**：
    在 `config.json` 中配置 `"voice_character"`：
-   * `zh-CN-XiaoyiNeural`（甜美少女音）
+   * `zh-CN-XiaoyiNeural`（甜美少女音，默认推荐）
    * `zh-CN-XiaoxiaoNeural`（温柔女声）
    * `zh-CN-YunxiNeural`（活泼男声）
 
-### 5.2 语音接收
-当用户在 QQ 上发来语音消息时，程序会自动解析 `[CQ:record,...]` 标签，识别为语音条输入，并在视觉/听觉提示中通知模型。
+### 7.2 语音接收与转写 (ASR)
+当用户在 QQ 上发来语音消息时，程序会自动下载语音文件并转写为文本：
+1. **纯文本模型（如 DeepSeek-Flash / DeepSeek-V3）配置云端 ASR**：
+   DeepSeek 等大模型为纯文本模型，不接收原始音频字节。推荐在 `config.json` 中配置国内免翻墙、毫秒级响应的 SiliconFlow（硅基流动）SenseVoice ASR 服务：
+   ```json
+   "asr_api_url": "https://api.siliconflow.cn/v1/audio/transcriptions",
+   "asr_api_key": "sk-xxxx",
+   "asr_model": "FunAudioLLM/SenseVoiceSmall"
+   ```
+2. **多模态模型（如 Gemini 1.5/2.0/3.8 Flash）**：
+   多模态模型原生具备理解音频能力，配合 `config.json` 中的多模态设置可直接感知语音语调。
+3. **国内网络保护机制**：
+   开源库 `speech_recognition` 默认调用的 Google ASR 在国内网络被屏蔽（此前会导致 120 秒网络超时卡住整个消息循环）。新版已加入异步解耦与 3.0 秒硬超时保护，并优先推荐国内 ASR / 本地 FunASR，确保轮询永远顺畅零卡顿！
 
 ---
 
