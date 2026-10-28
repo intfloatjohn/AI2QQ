@@ -431,8 +431,64 @@ def search_chat_history(query: str, max_results: int = 8) -> str:
 
 SEARCH_CACHE = {}
 
+def search_bing_cn(query: str, max_results: int = 3) -> list:
+    """Fast, reliable web search via cn.bing.com (fully unblocked in Mainland China)."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+        }
+        url = f"https://cn.bing.com/search?q={urllib.parse.quote(query)}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            content = resp.read().decode("utf-8", errors="ignore")
+
+        results = []
+        blocks = re.findall(r'<li class="b_algo"[^>]*>(.*?)</li>', content, re.DOTALL)
+        for b in blocks[:max_results]:
+            t_m = re.search(r'<h2[^>]*><a[^>]*>(.*?)</a>', b, re.DOTALL)
+            title = re.sub(r'<[^>]+>', '', t_m.group(1)).strip() if t_m else ""
+            s_m = re.search(r'<div class="b_caption"[^>]*>.*?<p[^>]*>(.*?)</p>', b, re.DOTALL)
+            if not s_m:
+                s_m = re.search(r'<p[^>]*>(.*?)</p>', b, re.DOTALL)
+            snippet = re.sub(r'<[^>]+>', '', s_m.group(1)).strip() if s_m else ""
+            if title:
+                results.append({"title": html.unescape(title), "body": html.unescape(snippet)})
+        return results
+    except Exception as e:
+        logging.warning(f"Bing CN search error: {e}")
+        return []
+
+def search_baidu_web(query: str, max_results: int = 3) -> list:
+    """Fast web search via Baidu (fully unblocked in Mainland China)."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9"
+        }
+        url = f"https://www.baidu.com/s?wd={urllib.parse.quote(query)}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            content = resp.read().decode("utf-8", errors="ignore")
+
+        results = []
+        blocks = re.findall(r'<div class="[^"]*c-container[^"]*"[^>]*>(.*?)</div>\s*</div>', content, re.DOTALL)
+        for b in blocks[:max_results]:
+            t_m = re.search(r'<h3[^>]*><a[^>]*>(.*?)</a>', b, re.DOTALL)
+            title = re.sub(r'<[^>]+>', '', t_m.group(1)).strip() if t_m else ""
+            s_m = re.search(r'<div class="[^"]*content-right[^"]*"[^>]*>(.*?)</div>', b, re.DOTALL)
+            if not s_m:
+                s_m = re.search(r'<span class="content-right_8Zs40"[^>]*>(.*?)</span>', b, re.DOTALL)
+            snippet = re.sub(r'<[^>]+>', '', s_m.group(1)).strip() if s_m else ""
+            if title:
+                results.append({"title": html.unescape(title), "body": html.unescape(snippet)})
+        return results
+    except Exception as e:
+        logging.warning(f"Baidu search error: {e}")
+        return []
+
 def web_search(query: str, max_results: int = 3, gen_id: int = 0) -> str:
-    """Executes live web search with fast caching, multi-engine resilience, and early abort."""
+    """Executes live web search with fast caching, multi-engine resilience (Bing CN, Baidu, DDGS), and early abort."""
     lang = config.get("language", "zh").lower()
     if not config.get("enable_web_search", True):
         return "Web search is disabled in settings." if lang == "en" else "网络搜索功能已被主人禁用。"
@@ -452,72 +508,50 @@ def web_search(query: str, max_results: int = 3, gen_id: int = 0) -> str:
 
     results_text = ""
 
-    # Method 1: DDGS auto backend with strict 5s timeout
-    try:
-        from ddgs import DDGS
-        items = list(DDGS(timeout=5).text(clean_q, max_results=max_results))
-        if items:
-            lines_list = []
-            for i, r in enumerate(items):
-                title = r.get("title", "")
-                snippet = (r.get("body", "") or r.get("snippet", "")).strip()[:240]
-                summary_label = "Snippet:" if lang == "en" else "摘要:"
-                lines_list.append(f"[{i+1}] {title}\n{summary_label} {snippet}")
+    # Strategy 1: For Chinese queries or servers in China, prioritize Bing China & Baidu (ultra-fast, unblocked)
+    if lang == "zh":
+        bing_items = search_bing_cn(clean_q, max_results=max_results)
+        if bing_items:
+            lines_list = [f"[{i+1}] {r['title']}\n摘要: {r['body'][:240]}" for i, r in enumerate(bing_items)]
             results_text = "\n\n".join(lines_list)
-    except Exception as e:
-        logging.warning(f"ddgs primary search failed ({e}), trying fallbacks...")
+        elif not results_text:
+            baidu_items = search_baidu_web(clean_q, max_results=max_results)
+            if baidu_items:
+                lines_list = [f"[{i+1}] {r['title']}\n摘要: {r['body'][:240]}" for i, r in enumerate(baidu_items)]
+                results_text = "\n\n".join(lines_list)
 
     with batch_lock:
         if gen_id and gen_id != current_generation_id:
             return ""
 
-    # Method 2: DDGS alternate backends (yahoo / wikipedia / duckduckgo)
-    if not results_text:
-        for b in ["yahoo", "wikipedia", "duckduckgo"]:
-            try:
-                from ddgs import DDGS
-                items = list(DDGS(timeout=4).text(clean_q, max_results=max_results, backend=b))
-                if items:
-                    lines_list = []
-                    for i, r in enumerate(items):
-                        title = r.get("title", "")
-                        snippet = (r.get("body", "") or r.get("snippet", "")).strip()[:240]
-                        summary_label = "Snippet:" if lang == "en" else "摘要:"
-                        lines_list.append(f"[{i+1}] {title}\n{summary_label} {snippet}")
-                    results_text = "\n\n".join(lines_list)
-                    break
-            except Exception:
-                continue
-
-    with batch_lock:
-        if gen_id and gen_id != current_generation_id:
-            return ""
-
-    # Method 3: Direct Wikipedia API fallback
+    # Strategy 2: If still empty (e.g. English mode or domestic engines empty), try DDGS with strict 4s timeout
     if not results_text:
         try:
-            import urllib.parse
-            encoded_q = urllib.parse.quote(clean_q)
-            wiki_domain = "en.wikipedia.org" if lang == "en" else "zh.wikipedia.org"
-            wiki_url = f"https://{wiki_domain}/w/api.php?action=query&list=search&srsearch={encoded_q}&format=json&utf8="
-            req = urllib.request.Request(wiki_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                witems = data.get("query", {}).get("search", [])
-                if witems:
-                    lines_list = []
-                    for i, it in enumerate(witems[:max_results]):
-                        title = it.get("title", "")
-                        snippet = re.sub(r"<[^>]+>", "", it.get("snippet", "")).strip()[:240]
-                        summary_label = "Snippet:" if lang == "en" else "摘要:"
-                        lines_list.append(f"[{i+1}] {title}\n{summary_label} {snippet}")
-                    results_text = "\n\n".join(lines_list)
+            from ddgs import DDGS
+            items = list(DDGS(timeout=4).text(clean_q, max_results=max_results))
+            if items:
+                lines_list = []
+                for i, r in enumerate(items):
+                    title = r.get("title", "")
+                    snippet = (r.get("body", "") or r.get("snippet", "")).strip()[:240]
+                    summary_label = "Snippet:" if lang == "en" else "摘要:"
+                    lines_list.append(f"[{i+1}] {title}\n{summary_label} {snippet}")
+                results_text = "\n\n".join(lines_list)
         except Exception as e:
-            logging.warning(f"Wiki fallback failed: {e}")
+            logging.warning(f"ddgs search failed: {e}")
+
+    # Fallback for English queries: Bing CN
+    if not results_text and lang != "zh":
+        bing_items = search_bing_cn(clean_q, max_results=max_results)
+        if bing_items:
+            lines_list = [f"[{i+1}] {r['title']}\nSnippet: {r['body'][:240]}" for i, r in enumerate(bing_items)]
+            results_text = "\n\n".join(lines_list)
 
     if results_text:
         SEARCH_CACHE[clean_q] = (now, results_text)
         return results_text
+
+    return "网络搜索暂时没有获取到相关内容，请直接根据已有知识回答。" if lang == "zh" else "Web search returned no relevant results."
 
     return f"No relevant search results found for '{clean_q}'." if lang == "en" else f"未能获取到“{clean_q}”的有效搜索结果。"
 
@@ -567,14 +601,20 @@ def trigger_auto_compact():
     except Exception as e:
         logging.error(f"AutoCompact failed: {e}")
 
+def get_llm_url() -> str:
+    """Returns the LLM API endpoint without unexpected auto-completion."""
+    base = config.get("base_url", "https://openrouter.ai/api/v1/chat/completions").strip()
+    if any(endpoint in base for endpoint in ["/chat/completions", "/completions", "/messages", "/generate"]):
+        return base
+    base_clean = base.rstrip("/")
+    if base_clean.endswith("/v1"):
+        return f"{base_clean}/chat/completions"
+    elif base_clean.count("/") <= 2:
+        return f"{base_clean}/chat/completions"
+    return base_clean
+
 def raw_llm_call(prompt: str, max_tokens: int = 800) -> str:
-    base = config.get("base_url", "https://openrouter.ai/api/v1/chat/completions").rstrip("/")
-    if base.endswith("/chat/completions"):
-        url = base
-    elif base.endswith("/v1"):
-        url = f"{base}/chat/completions"
-    else:
-        url = f"{base}/v1/chat/completions"
+    url = get_llm_url()
 
     headers = {
         "Content-Type": "application/json",
@@ -901,6 +941,29 @@ def extract_text_from_file(file_path: str, max_chars: int = 3500) -> str:
 
     return ""
 
+def resolve_onebot_file_path(path: str) -> str:
+    """Translates OneBot/NapCat container paths to host paths if running in Docker."""
+    if not path:
+        return ""
+    if os.path.exists(path):
+        return path
+    if path.startswith("/app/.config/QQ/"):
+        for base in ["/opt/napcat/qq", os.path.expanduser("~/.napcat/qq"), os.path.join(BASE_DIR, "qq")]:
+            host_p = path.replace("/app/.config/QQ", base)
+            if os.path.exists(host_p):
+                return host_p
+    if path.startswith("/app/napcat/config/"):
+        for base in ["/opt/napcat/config", os.path.expanduser("~/.napcat/config")]:
+            host_p = path.replace("/app/napcat/config", base)
+            if os.path.exists(host_p):
+                return host_p
+    fname = os.path.basename(path)
+    if os.path.exists("/opt/napcat/qq"):
+        for root, dirs, files in os.walk("/opt/napcat/qq"):
+            if fname in files:
+                return os.path.join(root, fname)
+    return path
+
 def process_incoming_file(file_id: str, file_name: str = "", file_size: int = 0, file_url: str = "") -> str:
     """Download/locate incoming file, extract readable text, and format for the model."""
     if not config.get("enable_file_parser", True):
@@ -912,12 +975,16 @@ def process_incoming_file(file_id: str, file_name: str = "", file_size: int = 0,
             res = call_onebot_api("get_file", {"file_id": file_id})
             if res.get("status") == "ok":
                 local_path = res.get("data", {}).get("file", "")
-                if not file_url:
-                    file_url = res.get("data", {}).get("url", "")
+                data_url = res.get("data", {}).get("url", "")
+                if not file_url and data_url and data_url.startswith(("http://", "https://")):
+                    file_url = data_url
         except Exception as e:
             logging.debug(f"get_file API error: {e}")
 
-    if (not local_path or not os.path.exists(local_path)) and file_url:
+    if local_path:
+        local_path = resolve_onebot_file_path(local_path)
+
+    if (not local_path or not os.path.exists(local_path)) and file_url and file_url.startswith(("http://", "https://")):
         try:
             temp_dir = os.path.join(BASE_DIR, "downloads")
             os.makedirs(temp_dir, exist_ok=True)
@@ -1008,12 +1075,16 @@ def process_incoming_voice(file_id: str, file_url: str = "") -> str:
             res = call_onebot_api("get_record", {"file": file_id, "out_format": "mp3"})
             if res.get("status") == "ok":
                 local_path = res.get("data", {}).get("file", "")
-                if not file_url:
-                    file_url = res.get("data", {}).get("url", "")
+                data_url = res.get("data", {}).get("url", "")
+                if not file_url and data_url and data_url.startswith(("http://", "https://")):
+                    file_url = data_url
         except Exception as e:
             logging.debug(f"get_record API error: {e}")
 
-    if (not local_path or not os.path.exists(local_path)) and file_url:
+    if local_path:
+        local_path = resolve_onebot_file_path(local_path)
+
+    if (not local_path or not os.path.exists(local_path)) and file_url and file_url.startswith(("http://", "https://")):
         try:
             temp_dir = os.path.join(BASE_DIR, "downloads")
             os.makedirs(temp_dir, exist_ok=True)
@@ -1029,6 +1100,7 @@ def process_incoming_voice(file_id: str, file_url: str = "") -> str:
         transcription = transcribe_voice_audio(local_path)
         if transcription:
             return f"[语音消息 (已转文字): \"{transcription}\"]"
+        return f"[语音消息 (收到音频: {os.path.basename(local_path)})]"
 
     return "（收到一条语音消息）"
 
@@ -1038,11 +1110,20 @@ def process_incoming_voice(file_id: str, file_url: str = "") -> str:
 def parse_incoming_cq_content(raw_text: str, sender_id: int = 0):
     images_b64 = []
 
-    # 1. Resolve Combined / Forwarded Chat History [CQ:forward,id=...]
-    fwd_matches = re.findall(r'\[CQ:forward,id=([^\],]+)\]', raw_text, re.IGNORECASE)
+    # 1. Resolve Combined / Forwarded Chat History [CQ:forward,...]
+    fwd_matches = re.findall(r'\[CQ:forward,[^\]]*?(?:id|res_id|forward_id)=([^\],]+)[^\]]*\]', raw_text, re.IGNORECASE)
+    for json_cq in re.finditer(r'\[CQ:json,data=([^\],]+)\]', raw_text, re.IGNORECASE):
+        try:
+            j_data = json.loads(html.unescape(json_cq.group(1)))
+            r_id = j_data.get("meta", {}).get("detail", {}).get("resid") or j_data.get("meta", {}).get("news", {}).get("resid")
+            if r_id and r_id not in fwd_matches:
+                fwd_matches.append(r_id)
+        except Exception:
+            pass
+
     for fwd_id in fwd_matches:
         fwd_content = fetch_forward_messages(fwd_id)
-        raw_text = re.sub(rf'\[CQ:forward,id={re.escape(fwd_id)}\]', f"\n{fwd_content}\n", raw_text)
+        raw_text = re.sub(rf'\[CQ:forward,[^\]]*?(?:id|res_id|forward_id)={re.escape(fwd_id)}[^\]]*\]', f"\n{fwd_content}\n", raw_text)
 
     # 2. Resolve Super Emojis & Marketface [CQ:marketface,id=...,summary=...]
     for mf in re.finditer(r'\[CQ:marketface,[^\]]*?\]', raw_text, re.IGNORECASE):
@@ -1344,13 +1425,7 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
         mem_header = "【Long-term Memory Archive (Use [read_memory] or [remember: text])】:" if lang == "en" else "【长期记忆概览（可使用 [查看记忆] 获取完整版，使用 [更新记忆: 内容] 实时补充）】:"
         system_prompt += f"\n\n{mem_header}\n{long_term_memory}"
 
-    base = config.get("base_url", "https://openrouter.ai/api/v1/chat/completions").rstrip("/")
-    if base.endswith("/chat/completions"):
-        url = base
-    elif base.endswith("/v1"):
-        url = f"{base}/chat/completions"
-    else:
-        url = f"{base}/v1/chat/completions"
+    url = get_llm_url()
 
     api_key = config.get("api_key", "").strip()
     if not api_key:
@@ -1676,6 +1751,7 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
 
             delay_sec = config.get("multi_bubble_delay_sec", 1.2)
             for idx, bubble in enumerate(bubbles):
+                recent_bot_replies.append(bubble)
                 res = call_onebot_api("send_private_msg", {
                     "user_id": config["master_qq"],
                     "message": bubble
@@ -1742,6 +1818,78 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
             debounce_timer = threading.Timer(debounce_delay, trigger_generation, args=[gen_id])
             debounce_timer.start()
 
+def is_bot_echo(text: str) -> bool:
+    """Checks if a received message is an echo of the bot's own recent replies."""
+    clean = text.strip()
+    if not clean:
+        return True
+    for r in list(recent_bot_replies):
+        if not r:
+            continue
+        r_clean = r.strip()
+        if clean == r_clean:
+            return True
+        if len(clean) >= 4 and (clean in r_clean or r_clean in clean):
+            return True
+        if len(r_clean) >= 4 and (clean[:12] in r_clean or r_clean[:12] in clean):
+            return True
+    return False
+
+def extract_full_message_text(m: dict) -> str:
+    """Extracts complete text/CQ representation from OneBot message object."""
+    msg = m.get("message")
+    raw = m.get("raw_message") or ""
+
+    if isinstance(msg, list):
+        cq_parts = []
+        for seg in msg:
+            stype = seg.get("type", "text")
+            sdata = seg.get("data", {})
+            if stype == "text":
+                cq_parts.append(sdata.get("text", ""))
+            elif stype in ["forward", "node"]:
+                fid = sdata.get("id") or sdata.get("res_id") or sdata.get("forward_id") or ""
+                cq_parts.append(f"[CQ:forward,id={fid}]")
+            elif stype == "record":
+                file_id = sdata.get("file") or sdata.get("url") or ""
+                url = sdata.get("url") or ""
+                cq_parts.append(f"[CQ:record,file={file_id},url={url}]")
+            elif stype == "image":
+                url = sdata.get("url") or ""
+                file_id = sdata.get("file") or ""
+                sub_type = sdata.get("subType") or ""
+                cq_parts.append(f"[CQ:image,file={file_id},url={url},subType={sub_type}]")
+            elif stype == "file":
+                fid = sdata.get("file_id") or sdata.get("id") or sdata.get("file") or ""
+                fname = sdata.get("name") or ""
+                fsize = sdata.get("size") or ""
+                furl = sdata.get("url") or ""
+                cq_parts.append(f"[CQ:file,file_id={fid},name={fname},size={fsize},url={furl}]")
+            elif stype == "marketface":
+                summary = sdata.get("summary") or ""
+                cq_parts.append(f"[CQ:marketface,summary={summary}]")
+            elif stype == "face":
+                fid = sdata.get("id") or ""
+                cq_parts.append(f"[CQ:face,id={fid}]")
+            elif stype == "poke":
+                cq_parts.append("[CQ:poke]")
+            elif stype == "dice":
+                val = sdata.get("value") or ""
+                cq_parts.append(f"[CQ:dice,value={val}]")
+            elif stype == "rps":
+                val = sdata.get("value") or sdata.get("type") or ""
+                cq_parts.append(f"[CQ:rps,value={val}]")
+            else:
+                params = ",".join(f"{k}={v}" for k, v in sdata.items() if v is not None and k not in ["file", "url", "text"])
+                cq_parts.append(f"[CQ:{stype}{',' + params if params else ''}]")
+        reconstructed = "".join(cq_parts)
+        if any(marker in reconstructed for marker in ["[CQ:forward", "[CQ:record", "[CQ:file"]):
+            return reconstructed
+        if not raw and reconstructed:
+            return reconstructed
+
+    return raw or (str(msg) if msg else "")
+
 def poll_messages_loop():
     logging.info("Active High-Frequency Poller started...")
     is_self_chat = str(config.get("bot_qq", "")) == str(config.get("master_qq", ""))
@@ -1766,11 +1914,11 @@ def poll_messages_loop():
                 for m in msgs:
                     mid = m.get("message_id")
                     sender_id = m.get("sender", {}).get("user_id")
-                    text = m.get("raw_message") or ""
+                    text = extract_full_message_text(m)
                     if mid and mid not in processed_message_ids:
                         if is_self_chat:
                             # In self-chat mode, ignore messages matching recent bot replies to prevent infinite echo
-                            if any(text == r or (len(r) > 10 and r[:20] in text) for r in recent_bot_replies if r):
+                            if is_bot_echo(text):
                                 processed_message_ids.add(mid)
                                 continue
                             on_message_arrived(mid, sender_id or config["master_qq"], text)
