@@ -7,3 +7,5 @@ python-dotenv>=1.0.0
 edge-tts>=7.0.0
 ddgs>=9.0.0
 mcp>=2.0.0
+qrcode>=7.4.2
+pillow>=9.0.0

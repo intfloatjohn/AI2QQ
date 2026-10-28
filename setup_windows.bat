@@ -36,6 +36,11 @@ echo [*] Installing dependencies from requirements.txt...
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 
+:: Pre-cache TTS Voice Engine
+echo.
+echo [*] Auto-downloading and initializing Edge-TTS voice engine...
+python -c "import edge_tts, asyncio, os; asyncio.run(edge_tts.Communicate('TTS initialized', 'zh-CN-XiaoyiNeural').save('test_tts.mp3')); os.remove('test_tts.mp3') if os.path.exists('test_tts.mp3') else None; print('[+] Voice engine ready!')"
+
 :: 3. Check config.json
 if not exist "config.json" (
     echo [*] config.json not found. Creating from config.example.json...

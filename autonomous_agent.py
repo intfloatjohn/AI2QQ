@@ -299,69 +299,85 @@ def read_memory_file() -> str:
     return empty_msg
 
 def search_chat_history(query: str, max_results: int = 8) -> str:
-    """Searches chat_history.jsonl (and agent.log as fallback) for matching dialogue turns."""
-    clean_q = query.strip()
+    """Searches chat_history.jsonl and agent.log for matching dialogue turns (newest first, multi-keyword)."""
     lang = config.get("language", "zh").lower()
+    clean_q = query.strip()
     if not clean_q:
         return "Search keyword cannot be empty." if lang == "en" else "搜索关键词不能为空。"
 
-    matches = []
-    # 1. Search full chat history jsonl
+    keywords = [k.strip().lower() for k in re.split(r'[\s,，、]+', clean_q) if k.strip()]
+    if not keywords:
+        keywords = [clean_q.lower()]
+
+    candidates = []
+
+    # 1. Search full chat history jsonl (newest first)
     if os.path.exists(CHAT_LOG_FILE):
         try:
             with open(CHAT_LOG_FILE, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            for i, line in enumerate(lines):
-                line = line.strip()
+                ch_lines = f.readlines()
+            for i in range(len(ch_lines) - 1, -1, -1):
+                line = ch_lines[i].strip()
                 if not line:
                     continue
                 try:
                     item = json.loads(line)
-                    text = item.get("text", "")
-                    if clean_q.lower() in text.lower():
+                    text = item.get("text", "").lower()
+                    matched_kws = sum(1 for kw in keywords if kw in text)
+                    if matched_kws > 0:
                         start = max(0, i - 1)
-                        end = min(len(lines), i + 2)
+                        end = min(len(ch_lines), i + 2)
                         context_snippets = []
                         for c_idx in range(start, end):
                             try:
-                                c_entry = json.loads(lines[c_idx].strip())
-                                role_label = "User" if c_entry.get("role") == "user" else "Assistant"
+                                c_entry = json.loads(ch_lines[c_idx].strip())
+                                is_user = c_entry.get("role") == "user"
+                                if lang == "en":
+                                    role_label = "User" if is_user else "Agent"
+                                else:
+                                    role_label = "主人" if is_user else "伴侣"
                                 context_snippets.append(f"[{c_entry.get('time')}] {role_label}: {c_entry.get('text')}")
                             except Exception:
                                 pass
-                        matches.append("\n".join(context_snippets))
-                        if len(matches) >= max_results:
+                        candidates.append((matched_kws, i, "\n".join(context_snippets)))
+                        if len(candidates) >= max_results * 2:
                             break
                 except Exception:
                     continue
         except Exception as e:
             logging.warning(f"Error searching {CHAT_LOG_FILE}: {e}")
 
-    # 2. Fallback search in agent.log
-    if not matches and os.path.exists(LOG_FILE):
+    # 2. Search agent.log for recent dialogue lines (newest first)
+    if os.path.exists(LOG_FILE):
         try:
             with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
                 log_lines = f.readlines()
-            for line in log_lines:
-                if ("User" in line or "Agent" in line) and clean_q.lower() in line.lower():
-                    matches.append(line.strip())
-                    if len(matches) >= max_results:
-                        break
+            for line in reversed(log_lines[-1000:]):
+                if ("User" in line or "Agent" in line or "Master" in line) and any(kw in line.lower() for kw in keywords):
+                    matched_kws = sum(1 for kw in keywords if kw in line.lower())
+                    clean_line = line.strip()
+                    if not any(clean_line in c[2] for c in candidates):
+                        candidates.append((matched_kws, 0, clean_line))
+                        if len(candidates) >= max_results * 3:
+                            break
         except Exception as e:
             logging.warning(f"Error searching {LOG_FILE}: {e}")
 
-    if matches:
-        title = "【Chat History Matches】:\n" if lang == "en" else "【过往相关聊天记录】:\n"
-        return title + "\n---\n".join(matches)
-    return f"No past chat logs found for '{clean_q}'." if lang == "en" else f"未找到关于“{clean_q}”的过往聊天记录。"
+    if candidates:
+        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        top_matches = [c[2] for c in candidates[:max_results]]
+        header = "【Relevant Past Dialogue History】:\n" if lang == "en" else "【过往相关聊天记录】:\n"
+        return header + "\n---\n".join(top_matches)
+
+    return f"No past dialogue records found regarding '{clean_q}'." if lang == "en" else f"未找到关于“{clean_q}”的过往聊天记录。"
 
 SEARCH_CACHE = {}
 
 def web_search(query: str, max_results: int = 3, gen_id: int = 0) -> str:
-    """Executes live web search with fast caching, strict timeout, and early abort."""
+    """Executes live web search with fast caching, multi-engine resilience, and early abort."""
     lang = config.get("language", "zh").lower()
     if not config.get("enable_web_search", True):
-        return "Web search is currently disabled." if lang == "en" else "网络搜索功能已被禁用。"
+        return "Web search is disabled in settings." if lang == "en" else "网络搜索功能已被主人禁用。"
     clean_q = query.strip()
     if not clean_q:
         return "Search query cannot be empty." if lang == "en" else "搜索关键词不能为空。"
@@ -376,29 +392,50 @@ def web_search(query: str, max_results: int = 3, gen_id: int = 0) -> str:
         logging.info(f"web_search cache hit for: {clean_q}")
         return SEARCH_CACHE[clean_q][1]
 
-    snippet_label = "Snippet" if lang == "en" else "摘要"
-    link_label = "Link" if lang == "en" else "链接"
     results_text = ""
 
-    # Method 1: ddgs lite with strict 5s timeout
+    # Method 1: DDGS auto backend with strict 5s timeout
     try:
         from ddgs import DDGS
-        items = list(DDGS(timeout=5).text(clean_q, max_results=max_results, backend="lite"))
+        items = list(DDGS(timeout=5).text(clean_q, max_results=max_results))
         if items:
             lines_list = []
             for i, r in enumerate(items):
                 title = r.get("title", "")
                 snippet = (r.get("body", "") or r.get("snippet", "")).strip()[:240]
-                lines_list.append(f"[{i+1}] {title}" + chr(10) + f"{snippet_label}: {snippet}")
-            results_text = (chr(10) + chr(10)).join(lines_list)
+                summary_label = "Snippet:" if lang == "en" else "摘要:"
+                lines_list.append(f"[{i+1}] {title}\n{summary_label} {snippet}")
+            results_text = "\n\n".join(lines_list)
     except Exception as e:
-        logging.warning(f"ddgs search failed ({e}), trying fallback...")
+        logging.warning(f"ddgs primary search failed ({e}), trying fallbacks...")
 
     with batch_lock:
         if gen_id and gen_id != current_generation_id:
             return ""
 
-    # Method 2: Wikipedia API fallback
+    # Method 2: DDGS alternate backends (yahoo / wikipedia / duckduckgo)
+    if not results_text:
+        for b in ["yahoo", "wikipedia", "duckduckgo"]:
+            try:
+                from ddgs import DDGS
+                items = list(DDGS(timeout=4).text(clean_q, max_results=max_results, backend=b))
+                if items:
+                    lines_list = []
+                    for i, r in enumerate(items):
+                        title = r.get("title", "")
+                        snippet = (r.get("body", "") or r.get("snippet", "")).strip()[:240]
+                        summary_label = "Snippet:" if lang == "en" else "摘要:"
+                        lines_list.append(f"[{i+1}] {title}\n{summary_label} {snippet}")
+                    results_text = "\n\n".join(lines_list)
+                    break
+            except Exception:
+                continue
+
+    with batch_lock:
+        if gen_id and gen_id != current_generation_id:
+            return ""
+
+    # Method 3: Direct Wikipedia API fallback
     if not results_text:
         try:
             import urllib.parse
@@ -406,7 +443,7 @@ def web_search(query: str, max_results: int = 3, gen_id: int = 0) -> str:
             wiki_domain = "en.wikipedia.org" if lang == "en" else "zh.wikipedia.org"
             wiki_url = f"https://{wiki_domain}/w/api.php?action=query&list=search&srsearch={encoded_q}&format=json&utf8="
             req = urllib.request.Request(wiki_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=4) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 witems = data.get("query", {}).get("search", [])
                 if witems:
@@ -414,8 +451,9 @@ def web_search(query: str, max_results: int = 3, gen_id: int = 0) -> str:
                     for i, it in enumerate(witems[:max_results]):
                         title = it.get("title", "")
                         snippet = re.sub(r"<[^>]+>", "", it.get("snippet", "")).strip()[:240]
-                        lines_list.append(f"[{i+1}] {title}" + chr(10) + f"{snippet_label}: {snippet}")
-                    results_text = (chr(10) + chr(10)).join(lines_list)
+                        summary_label = "Snippet:" if lang == "en" else "摘要:"
+                        lines_list.append(f"[{i+1}] {title}\n{summary_label} {snippet}")
+                    results_text = "\n\n".join(lines_list)
         except Exception as e:
             logging.warning(f"Wiki fallback failed: {e}")
 
@@ -423,7 +461,7 @@ def web_search(query: str, max_results: int = 3, gen_id: int = 0) -> str:
         SEARCH_CACHE[clean_q] = (now, results_text)
         return results_text
 
-    return f"No valid search results found for '{clean_q}'." if lang == "en" else f"未能获取到“{clean_q}”的有效搜索结果。"
+    return f"No relevant search results found for '{clean_q}'." if lang == "en" else f"未能获取到“{clean_q}”的有效搜索结果。"
 
 def trigger_auto_compact():
     global conversation_history, long_term_memory
@@ -569,8 +607,11 @@ def sanitize_reply(text: str) -> str:
     cleaned = re.sub(r'\([^)]+\)', '', cleaned)
     cleaned = cleaned.strip()
 
+    # Strip any accidental single numbered list prefix (e.g. '1. ', '1、', '1: ')
+    cleaned = re.sub(r'^(?:1[.\、\s]|1\s*[-:])\s*', '', cleaned)
+
     lang = config.get("language", "zh").lower()
-    if lang == "zh" and re.search(r'[\u4e00-\u9fff]', cleaned):
+    if lang == "zh" and re.search(r'[一-鿿]', cleaned):
         cleaned = re.sub(r'nya~', '喵~', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'nya', '喵', cleaned, flags=re.IGNORECASE)
     
@@ -748,11 +789,11 @@ def record_chat_turn(user_content: str, assistant_reply: str, has_image: bool = 
 def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
     load_config()
     system_prompt = load_system_prompt()
-
     lang = config.get("language", "zh").lower()
+
     if long_term_memory:
-        mem_title = "【Persistent Long-Term Memory Overview】:" if lang == "en" else "【长期记忆概览（可使用 [查看记忆] 获取完整版，使用 [更新记忆: 内容] 实时补充）】:"
-        system_prompt += f"\n\n{mem_title}\n{long_term_memory}"
+        mem_header = "【Long-term Memory Archive (Use [read_memory] or [remember: text])】:" if lang == "en" else "【长期记忆概览（可使用 [查看记忆] 获取完整版，使用 [更新记忆: 内容] 实时补充）】:"
+        system_prompt += f"\n\n{mem_header}\n{long_term_memory}"
 
     base = config.get("base_url", "https://openrouter.ai/api/v1/chat/completions").rstrip("/")
     if base.endswith("/chat/completions"):
@@ -764,7 +805,7 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
 
     api_key = config.get("api_key", "").strip()
     if not api_key:
-        return "Please configure a valid API Key in config.json to start chatting."
+        return "Please configure a valid API Key in config.json!" if lang == "en" else "请在 config.json 填入有效的 API Key！"
 
     messages = [{"role": "system", "content": system_prompt}]
     with memory_lock:
@@ -774,20 +815,17 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
 
     if images_b64:
         content_items = []
-        caption = user_prompt if user_prompt else ("(Sent an image)" if lang == "en" else "（对方发送了图片）")
+        default_caption = "(The user sent an image)" if lang == "en" else "（对方发送了一张图片）"
+        caption = user_prompt if user_prompt else default_caption
         content_items.append({"type": "text", "text": caption})
         for b64 in images_b64:
             content_items.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
             })
-        current_turn = {"role": "user", "content": content_items}
-        history_record_text = f"{user_prompt} [图片]" if user_prompt else "[图片]"
+        messages.append({"role": "user", "content": content_items})
     else:
-        current_turn = {"role": "user", "content": user_prompt}
-        history_record_text = user_prompt
-
-    messages.append(current_turn)
+        messages.append({"role": "user", "content": user_prompt})
 
     headers = {
         "Content-Type": "application/json",
@@ -797,21 +835,25 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
     }
 
     max_tokens_val = int(config.get("max_tokens", 1200))
+    max_tool_turns = 5
 
-    # ReAct tool-execution loop (up to 3 turns)
-    for iteration in range(3):
+    # ReAct tool-execution loop (up to 5 turns)
+    for iteration in range(max_tool_turns):
         with batch_lock:
             if gen_id and gen_id != current_generation_id:
                 logging.info(f"LLM loop iteration #{iteration+1} aborted early: generation #{gen_id} was superseded by #{current_generation_id}.")
                 return ""
 
+        # On the final turn, force response synthesis without tools
+        is_final_turn = (iteration == max_tool_turns - 1)
         payload = {
             "model": config.get("model", "google/gemini-3.8-flash"),
             "messages": messages,
             "temperature": 0.72,
-            "max_tokens": max_tokens_val,
-            "tools": AVAILABLE_TOOLS
+            "max_tokens": max_tokens_val
         }
+        if not is_final_turn:
+            payload["tools"] = AVAILABLE_TOOLS
 
         data = {}
         for attempt in range(2):
@@ -834,7 +876,7 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
                             label = "【Tool Search Observation】:" if lang == "en" else "【系统提示：工具搜索结果】:"
                             clean_msgs.append({
                                 "role": "user",
-                                "content": label + chr(10) + str(m.get("content", "")) + chr(10) + ("Please reply naturally based on this." if lang == "en" else "请结合搜索结果自然回复。")
+                                "content": label + "\n" + str(m.get("content", "")) + "\n" + ("Please reply naturally based on this." if lang == "en" else "请结合搜索结果自然回复。")
                             })
                         elif m.get("role") == "assistant" and m.get("tool_calls"):
                             continue
@@ -871,7 +913,7 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
             update_memory_realtime(mem_content)
 
         # 1. Native Function Calling
-        if tool_calls:
+        if tool_calls and not is_final_turn:
             messages.append(message_obj)
             for tc in tool_calls:
                 call_id = tc.get("id", "call_0")
@@ -897,7 +939,7 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
             continue
 
         # 2. Inline Command Tag Handling
-        if inline_search or inline_chat_search or inline_read_mem:
+        if (inline_search or inline_chat_search or inline_read_mem) and not is_final_turn:
             obs_lines = []
             if inline_search:
                 q = inline_search.group(1).strip()
@@ -921,9 +963,9 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
         if reply_sanitized:
             return reply_sanitized
 
-        return "I'm here! What can I do for you?"
+        return "I'm here! What can I do for you?" if lang == "en" else "在的！有什么可以帮你的？"
 
-    lang = config.get("language", "zh").lower()
+    # Fallback companion apology (time-neutral, works for both daytime and evening)
     if lang == "en":
         return "I experienced a temporary network timeout connecting to the AI brain. Please try asking again in a moment."
     return "刚才连接大模型服务网络稍有超时。请稍后再试一次。"
@@ -973,7 +1015,8 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
         lines_for_llm = []
         lines_for_history = []
 
-        for idx, item in enumerate(batch_to_process, 1):
+        # Collect raw clean messages without premature '1.' numbering
+        for item in batch_to_process:
             txt = item.get("text", "").strip()
             imgs = item.get("images", [])
             if imgs:
@@ -984,13 +1027,13 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
             img_tag_hist = "[Image]" if lang == "en" else "[图片]"
 
             if txt and has_img:
-                lines_for_llm.append(f"{idx}. {txt} {img_tag_prompt}")
+                lines_for_llm.append(f"{txt} {img_tag_prompt}")
                 lines_for_history.append(f"{txt} {img_tag_hist}")
             elif txt:
-                lines_for_llm.append(f"{idx}. {txt}")
+                lines_for_llm.append(txt)
                 lines_for_history.append(txt)
             elif has_img:
-                lines_for_llm.append(f"{idx}. {img_tag_prompt}")
+                lines_for_llm.append(img_tag_prompt)
                 lines_for_history.append(img_tag_hist)
 
         if not lines_for_llm and not all_images:
@@ -1002,11 +1045,14 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
             return
 
         if len(lines_for_llm) <= 1:
+            # Single non-combined message: pure raw user message with NO numbered prefix!
             user_prompt_for_llm = lines_for_llm[0] if lines_for_llm else ""
             default_empty = "[Image]" if lang == "en" else "[图片]"
             history_record_text = lines_for_history[0] if lines_for_history else default_empty
         else:
-            combined_dialogue = "\n".join(lines_for_llm)
+            # Multi-message combine: only here do we number each message 1., 2., 3.!
+            numbered_lines = [f"{i}. {line}" for i, line in enumerate(lines_for_llm, 1)]
+            combined_dialogue = "\n".join(numbered_lines)
             if lang == "en":
                 user_prompt_for_llm = (
                     f"The user sent the following messages in a row:\n{combined_dialogue}\n"
