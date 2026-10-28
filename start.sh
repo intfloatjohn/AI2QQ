@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # One-Line All-in-One Launcher for QQ AI Companion Daemon
-# Automatically starts NapCat (Docker), displays WebUI token & QR, and boots agent
+# Preflight checks mirrors, auto-switches Docker sources, handles QR login & boots
 # ==============================================================================
 set -e
 
@@ -22,11 +22,12 @@ if [ -f "config.json" ]; then
 fi
 
 # 2. Check if OneBot 11 is already responding
-echo "[*] Checking OneBot 11 status on ${ONEBOT_API}..."
 check_onebot_online() {
     curl -s --connect-timeout 2 "${ONEBOT_API}/get_version_info" >/dev/null 2>&1 || \
     curl -s --connect-timeout 2 "${ONEBOT_API}/get_status" >/dev/null 2>&1
 }
+
+echo "[*] Checking OneBot 11 status on ${ONEBOT_API}..."
 
 if check_onebot_online; then
     echo "[+] OneBot 11 (NapCat) is already running and online!"
@@ -47,27 +48,122 @@ else
         fi
     fi
 
-    # Check if Docker is installed
     if command -v docker >/dev/null 2>&1; then
-        # Check if a container named 'napcat' exists
+        # Function to pull NapCat with preflight source checks
+        pull_napcat_image() {
+            # Check local cache first
+            local cached_img
+            cached_img=$($DOCKER_CMD images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -i "napcat" | head -1 || true)
+            if [ -n "$cached_img" ]; then
+                echo "[+] Found cached local NapCat image: $cached_img"
+                CHOSEN_IMG="$cached_img"
+                return 0
+            fi
+
+            echo "[*] Preflight checking Docker mirror availability..."
+            echo "------------------------------------------------------------------"
+
+            # Candidates: Name | Host | Image
+            local candidates=(
+                "DaoCloud Direct|docker.m.daocloud.io|docker.m.daocloud.io/mlikiowa/napcat-docker:latest"
+                "DaoCloud Mirror|m.daocloud.io|m.daocloud.io/docker.io/mlikiowa/napcat-docker:latest"
+                "DockerPull CN|dockerpull.cn|dockerpull.cn/mlikiowa/napcat-docker:latest"
+                "GitHub GHCR (NapCat Node)|ghcr.io|ghcr.io/napneko/nodenapcat:latest"
+                "GitHub GHCR (NapCat Docker)|ghcr.io|ghcr.io/napneko/napcat-docker:latest"
+                "DockerHub Direct|registry-1.docker.io|mlikiowa/napcat-docker:latest"
+            )
+
+            local available_images=()
+
+            for item in "${candidates[@]}"; do
+                IFS="|" read -r name host img <<< "$item"
+                local code
+                code=$(curl -s -k -o /dev/null -w "%{http_code}" --connect-timeout 2 -m 3 "https://${host}/v2/" 2>/dev/null || echo "000")
+                if [[ "$code" =~ ^(200|401|301|302)$ ]]; then
+                    echo "[✓] Available: $name ($host)"
+                    available_images+=("$img")
+                else
+                    echo "[-] Offline/Blocked: $name ($host)"
+                fi
+            done
+
+            echo "------------------------------------------------------------------"
+
+            if [ ${#available_images[@]} -gt 0 ]; then
+                for img in "${available_images[@]}"; do
+                    echo "[*] Downloading NapCat from: $img ..."
+                    if $DOCKER_CMD pull "$img"; then
+                        echo "[+] Successfully downloaded: $img!"
+                        CHOSEN_IMG="$img"
+                        $DOCKER_CMD tag "$img" mlikiowa/napcat-docker:latest 2>/dev/null || true
+                        $DOCKER_CMD tag "$img" napcat:latest 2>/dev/null || true
+                        return 0
+                    else
+                        echo "[-] Download failed from $img. Trying next available mirror..."
+                    fi
+                done
+            fi
+
+            echo "[!] Attempting direct fallback download..."
+            local fallback_images=(
+                "docker.m.daocloud.io/mlikiowa/napcat-docker:latest"
+                "m.daocloud.io/docker.io/mlikiowa/napcat-docker:latest"
+                "dockerpull.cn/mlikiowa/napcat-docker:latest"
+                "ghcr.io/napneko/nodenapcat:latest"
+                "mlikiowa/napcat-docker:latest"
+            )
+            for img in "${fallback_images[@]}"; do
+                echo "[*] Fallback pull attempt: $img ..."
+                if $DOCKER_CMD pull "$img"; then
+                    echo "[+] Successfully downloaded: $img!"
+                    CHOSEN_IMG="$img"
+                    $DOCKER_CMD tag "$img" mlikiowa/napcat-docker:latest 2>/dev/null || true
+                    return 0
+                fi
+            done
+
+            return 1
+        }
+
+        # Check existing container
         if $DOCKER_CMD ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^napcat$"; then
-            echo "[*] Found existing 'napcat' container. Starting it..."
-            $DOCKER_CMD start napcat >/dev/null 2>&1 || true
-        else
-            echo "[*] Creating and starting new NapCat Docker container..."
-            sudo mkdir -p /opt/napcat/config 2>/dev/null || mkdir -p "$HOME/.napcat/config" 2>/dev/null || true
+            CONTAINER_STATUS=$($DOCKER_CMD inspect -f '{{.State.Status}}' napcat 2>/dev/null || echo "unknown")
+            if [ "$CONTAINER_STATUS" = "running" ]; then
+                echo "[+] Container 'napcat' is already running."
+            else
+                echo "[*] Found existing 'napcat' container (status: $CONTAINER_STATUS). Starting..."
+                if ! $DOCKER_CMD start napcat >/dev/null 2>&1; then
+                    echo "[!] Failed to start existing container. Recreating container..."
+                    $DOCKER_CMD rm -f napcat >/dev/null 2>&1 || true
+                fi
+            fi
+        fi
+
+        # Create container if not exists
+        if ! $DOCKER_CMD ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^napcat$"; then
+            CHOSEN_IMG=""
+            if ! pull_napcat_image; then
+                echo "[!] Error: All Docker mirrors and download sources failed to pull NapCat."
+                echo "    Tip: Check network connectivity or configure Docker mirror in /etc/docker/daemon.json"
+                exit 1
+            fi
+
+            echo "[*] Starting NapCat container with image: $CHOSEN_IMG ..."
+            sudo mkdir -p /opt/napcat/config /opt/napcat/qq 2>/dev/null || mkdir -p "$HOME/.napcat/config" "$HOME/.napcat/qq" 2>/dev/null || true
+
             $DOCKER_CMD run -d \
                 --name napcat \
                 --restart always \
                 --network host \
+                -e WEBUI_TOKEN=napcat \
                 -v /opt/napcat/config:/app/napcat/config \
-                mlikiowa/napcat-docker:latest >/dev/null 2>&1 || true
+                -v /opt/napcat/qq:/app/.config/QQ \
+                "$CHOSEN_IMG"
         fi
 
         echo "[*] Waiting for NapCat to boot..."
         WAIT_SECONDS=0
-        MAX_WAIT=10
-        while [ $WAIT_SECONDS -lt $MAX_WAIT ]; do
+        while [ $WAIT_SECONDS -lt 6 ]; do
             if check_onebot_online; then
                 echo "[+] NapCat is online and ready!"
                 break
@@ -79,57 +175,43 @@ else
         echo ""
 
         if ! check_onebot_online; then
-            # Display WebUI credentials and extract QR code cleanly without hash spam
-            python3 -c "
-import json, os, re, subprocess
+            PUBLIC_IP=$(curl -s --connect-timeout 2 http://ifconfig.me 2>/dev/null || curl -s --connect-timeout 2 http://api.ipify.org 2>/dev/null || echo "127.0.0.1")
 
-token = 'Unknown'
-port = 6099
-for p in ['/opt/napcat/config/webui.json', os.path.expanduser('~/.napcat/config/webui.json')]:
-    if os.path.exists(p):
-        try:
-            with open(p, 'r', encoding='utf-8') as f:
-                d = json.load(f)
-                token = d.get('token', token)
-                port = d.get('port', port)
-            break
-        except:
-            pass
-
-print('==================================================================')
-print(' [!] NapCat is waiting for Mobile QQ QR code login!')
-print('------------------------------------------------------------------')
-print(' WebUI Dashboard : http://127.0.0.1:' + str(port) + '/webui')
-print(' WebUI Token     : ' + str(token))
-print('==================================================================')
-
-try:
-    cmd = '${DOCKER_CMD} logs --tail 300 napcat'
-    res = subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.STDOUT)
-    urls = re.findall(r'https://txz\.qq\.com/p\?k=[^\s&]+&f=[0-9]+', res)
-    if urls:
-        latest_url = urls[-1]
-        print('\n[*] Mobile QQ QR Login URL (Click or paste in browser):')
-        print('    ' + latest_url + '\n')
-        try:
-            import qrcode
-            qr = qrcode.QRCode()
-            qr.add_data(latest_url)
-            print('Scan this QR code using Mobile QQ:\n')
-            qr.print_ascii(invert=True)
-        except Exception:
-            pass
-except Exception:
-    pass
-"
+            echo "=================================================================="
+            echo " [!] NapCat is waiting for Mobile QQ QR code login!"
+            echo "------------------------------------------------------------------"
+            echo " WebUI Dashboard : http://${PUBLIC_IP}:6099/webui"
+            echo " Local Dashboard : http://127.0.0.1:6099/webui"
+            echo " WebUI Token     : napcat"
+            echo " Direct URL      : http://${PUBLIC_IP}:6099/webui?token=napcat"
+            echo "------------------------------------------------------------------"
+            echo " * If WebUI is unreachable on Cloud VPS (AliCloud/Tencent/AWS):"
+            echo "   1) Allow port 6099 in Cloud Security Group (安全组入方向放行 6099)"
+            echo "   2) Or use SSH Tunnel: ssh -L 6099:127.0.0.1:6099 root@${PUBLIC_IP}"
+            echo "=================================================================="
             echo ""
-            echo "[*] Waiting for Mobile QQ scan & login confirmation..."
+            echo "[*] Streaming NapCat console logs & QR code below:"
+            echo "    (Please scan with Mobile QQ. Script will auto-proceed once logged in!)"
+            echo "------------------------------------------------------------------"
+
+            # Stream docker logs in background so ASCII QR code renders directly in terminal
+            $DOCKER_CMD logs -f napcat &
+            LOG_PID=$!
+            trap 'kill $LOG_PID 2>/dev/null || true; exit 1' INT TERM
+
+            # Poll until OneBot 11 login succeeds
             while ! check_onebot_online; do
                 sleep 2
-                echo -n "."
             done
+
+            kill $LOG_PID 2>/dev/null || true
+            wait $LOG_PID 2>/dev/null || true
+            trap - INT TERM
+
             echo ""
-            echo "[+] Login confirmed! OneBot 11 is now online on ${ONEBOT_API}!"
+            echo "=================================================================="
+            echo " [✓] Login confirmed! OneBot 11 is now online on ${ONEBOT_API}!"
+            echo "=================================================================="
         fi
     else
         echo "[!] Docker is not installed. Please install Docker or start NapCat manually."
