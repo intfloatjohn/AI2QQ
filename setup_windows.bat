@@ -64,12 +64,12 @@ set /p napcat_choice="Select an option [1-3, default: 3]: "
 if "%napcat_choice%"=="" set napcat_choice=3
 
 if "%napcat_choice%"=="1" (
-    echo [*] Downloading latest NapCat Windows OneKey package...
+    echo [*] Downloading latest NapCat Windows OneKey package (auto-mirror enabled)...
     if not exist "NapCat" mkdir NapCat
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $url = 'https://github.com/NapNeko/NapCatQQ/releases/latest/download/NapCat.Shell.Windows.OneKey.zip'; Write-Host 'Downloading NapCat from GitHub...'; Invoke-WebRequest -Uri $url -OutFile 'NapCat\NapCat.zip'; Write-Host 'Extracting files...'; Expand-Archive -Path 'NapCat\NapCat.zip' -DestinationPath 'NapCat' -Force; Remove-Item 'NapCat\NapCat.zip'; Write-Host 'Download and extraction complete!'"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $urls = @('https://gh-proxy.com/https://github.com/NapNeko/NapCatQQ/releases/latest/download/NapCat.Shell.Windows.OneKey.zip', 'https://github.com/NapNeko/NapCatQQ/releases/latest/download/NapCat.Shell.Windows.OneKey.zip'); $ok = $false; foreach ($u in $urls) { try { Write-Host \"Trying source: $u ...\"; Invoke-WebRequest -Uri $u -OutFile 'NapCat\NapCat.zip' -TimeoutSec 45; $ok = $true; break; } catch { Write-Host \"Source failed, trying next...\"; } }; if ($ok) { Write-Host 'Extracting NapCat files...'; Expand-Archive -Path 'NapCat\NapCat.zip' -DestinationPath 'NapCat' -Force; Remove-Item 'NapCat\NapCat.zip'; Write-Host 'NapCat installation ready!'; } else { Write-Host '[!] Could not auto-download NapCat. Please download from: https://github.com/NapNeko/NapCatQQ/releases'; }"
     echo.
     echo [+] NapCat has been extracted to the NapCat\ folder.
-    echo [*] Please run NapCatInstaller.exe inside NapCat\ to initialize QQ login!
+    echo [*] Please run NapCat.Quick.bat or NapCatInstaller.exe inside NapCat\ to complete QQ QR login!
     echo.
 )
 
