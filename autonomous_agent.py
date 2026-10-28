@@ -30,6 +30,7 @@ import threading
 import urllib.request
 import urllib.error
 import urllib.parse
+from collections import deque
 
 try:
     import edge_tts
@@ -113,6 +114,7 @@ QQ_FACES = {
 conversation_history = []
 long_term_memory = ""
 processed_message_ids = set()
+recent_bot_replies = deque(maxlen=100)
 memory_lock = threading.Lock()
 
 # Tools definitions for OpenAI function calling
@@ -1093,10 +1095,15 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
 
         clean_text_reply = clean_tags(reply)
         if clean_text_reply:
-            call_onebot_api("send_private_msg", {
+            recent_bot_replies.append(clean_text_reply)
+            res = call_onebot_api("send_private_msg", {
                 "user_id": config["master_qq"],
                 "message": clean_text_reply
             })
+            if isinstance(res, dict) and res.get("status") == "ok":
+                bot_mid = res.get("data", {}).get("message_id")
+                if bot_mid:
+                    processed_message_ids.add(bot_mid)
 
         # Re-initialize the race generation counter back to 0 once all active queues are idle
         with batch_lock:
@@ -1120,7 +1127,8 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
     if len(processed_message_ids) > 10000:
         processed_message_ids.difference_update(list(processed_message_ids)[:-5000])
 
-    if sender_id != config["master_qq"]:
+    is_self_chat = str(config.get("bot_qq", "")) == str(config.get("master_qq", ""))
+    if not is_self_chat and sender_id != config["master_qq"]:
         return
 
     clean_text, images_b64, has_voice = parse_incoming_cq_content(raw_text)
@@ -1154,6 +1162,10 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
 
 def poll_messages_loop():
     logging.info("Active High-Frequency Poller started...")
+    is_self_chat = str(config.get("bot_qq", "")) == str(config.get("master_qq", ""))
+    if is_self_chat:
+        logging.info("[*] Single-Account Self-Chat Mode active (bot_qq == master_qq). Filtering bot echoes automatically.")
+
     try:
         init_res = call_onebot_api("get_friend_msg_history", {"user_id": config["master_qq"], "count": 15})
         if init_res.get("status") == "ok":
@@ -1173,8 +1185,15 @@ def poll_messages_loop():
                     mid = m.get("message_id")
                     sender_id = m.get("sender", {}).get("user_id")
                     text = m.get("raw_message") or ""
-                    if mid and mid not in processed_message_ids and sender_id == config["master_qq"]:
-                        on_message_arrived(mid, sender_id, text)
+                    if mid and mid not in processed_message_ids:
+                        if is_self_chat:
+                            # In self-chat mode, ignore messages matching recent bot replies to prevent infinite echo
+                            if any(text == r or (len(r) > 10 and r[:20] in text) for r in recent_bot_replies if r):
+                                processed_message_ids.add(mid)
+                                continue
+                            on_message_arrived(mid, sender_id or config["master_qq"], text)
+                        elif sender_id == config["master_qq"]:
+                            on_message_arrived(mid, sender_id, text)
         except Exception as e:
             logging.warning(f"Poll loop exception: {e}")
         time.sleep(config.get("poll_interval_sec", 0.8))
