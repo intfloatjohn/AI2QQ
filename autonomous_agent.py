@@ -158,6 +158,7 @@ long_term_memory = ""
 processed_message_ids = set()
 recent_bot_replies = deque(maxlen=100)
 last_bot_voice_send_time = 0.0
+latest_received_image_bytes = None
 memory_lock = threading.Lock()
 
 # Tools definitions for OpenAI function calling
@@ -668,6 +669,7 @@ def call_onebot_api(endpoint: str, payload: dict) -> dict:
 
 def download_image_data(img_url: str, file_id: str = "") -> tuple:
     """Downloads image and returns (base64_str, raw_bytes)."""
+    global latest_received_image_bytes
     clean_url = html.unescape(img_url)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -695,6 +697,7 @@ def download_image_data(img_url: str, file_id: str = "") -> tuple:
             logging.error(f"Fallback get_image failed: {e}")
 
     if raw_bytes:
+        latest_received_image_bytes = raw_bytes
         return base64.b64encode(raw_bytes).decode("utf-8"), raw_bytes
     return "", b""
 
@@ -706,17 +709,57 @@ def download_image_as_base64(img_url: str, file_id: str = "") -> str:
 # Feature 5: Visual Memory & Custom Picture Database
 # ==============================================================================
 def init_picture_database():
-    """Initializes picture database directory and catalog index."""
+    """Initializes picture database directory and catalog index, and auto-imports static stickers."""
     os.makedirs(PICTURE_IMAGES_DIR, exist_ok=True)
-    if not os.path.exists(PICTURE_CATALOG_FILE):
+    catalog = []
+    if os.path.exists(PICTURE_CATALOG_FILE):
         try:
-            with open(PICTURE_CATALOG_FILE, "w", encoding="utf-8") as f:
-                json.dump([], f, indent=2, ensure_ascii=False)
+            with open(PICTURE_CATALOG_FILE, "r", encoding="utf-8") as f:
+                catalog = json.load(f)
+                if not isinstance(catalog, list):
+                    catalog = []
         except Exception as e:
             logging.warning(f"Failed to initialize picture catalog: {e}")
+            catalog = []
+
+    # Auto-import existing stickers from stickers/ into catalog if not yet indexed
+    if os.path.exists(STICKERS_DIR):
+        modified = False
+        for fname in os.listdir(STICKERS_DIR):
+            fpath = os.path.join(STICKERS_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            base, ext = os.path.splitext(fname)
+            if ext.lower() not in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
+                continue
+            try:
+                with open(fpath, "rb") as sf:
+                    sbytes = sf.read()
+                sha = hashlib.sha256(sbytes).hexdigest()[:16]
+                if not any(item.get("id") == sha or item.get("filename") == fname for item in catalog):
+                    aliases = STICKER_ALIASES.get(base.lower(), [])
+                    tags = list(dict.fromkeys([base.lower()] + [a.lower() for a in aliases]))
+                    catalog.append({
+                        "id": sha,
+                        "filename": fname,
+                        "path": os.path.relpath(fpath, BASE_DIR),
+                        "timestamp": int(os.path.getmtime(fpath)),
+                        "sender_id": 0,
+                        "tags": tags,
+                        "summary": f"表情贴图 ({base})"
+                    })
+                    modified = True
+            except Exception as se:
+                logging.debug(f"Sticker import error for {fname}: {se}")
+        if modified or not os.path.exists(PICTURE_CATALOG_FILE):
+            try:
+                with open(PICTURE_CATALOG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(catalog, f, indent=2, ensure_ascii=False)
+            except Exception as we:
+                logging.warning(f"Failed to write picture catalog: {we}")
 
 def save_to_picture_database(image_bytes: bytes, sender_id: int = 0, tags: list = None, summary: str = "", filename: str = "") -> dict:
-    """Saves a picture into the local library, deduplicating via SHA256 and indexing in catalog.json."""
+    """Saves or updates a picture in the local library, deduplicating via SHA256 and indexing in catalog.json."""
     if not image_bytes or len(image_bytes) < 200:
         return {}
     init_picture_database()
@@ -756,13 +799,23 @@ def save_to_picture_database(image_bytes: bytes, sender_id: int = 0, tags: list 
                 catalog = json.load(f)
                 if not isinstance(catalog, list):
                     catalog = []
-        if not any(item.get("id") == sha for item in catalog):
+
+        # If already exists, update tags and description dynamically
+        existing = next((item for item in catalog if item.get("id") == sha), None)
+        if existing:
+            if tags:
+                existing["tags"] = list(dict.fromkeys(existing.get("tags", []) + tags))
+            if summary:
+                existing["summary"] = summary
+            logging.info(f"Updated picture in catalog: {dest_filename} (tags: {existing.get('tags')}, summary: '{existing.get('summary')}')")
+        else:
             catalog.append(entry)
             if len(catalog) > 1000:
                 catalog = catalog[-1000:]
-            with open(PICTURE_CATALOG_FILE, "w", encoding="utf-8") as f:
-                json.dump(catalog, f, indent=2, ensure_ascii=False)
-            logging.info(f"Saved new image to picture database: {dest_filename} (tags: {tags})")
+            logging.info(f"Saved new image to picture database: {dest_filename} (tags: {tags}, summary: '{summary}')")
+
+        with open(PICTURE_CATALOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(catalog, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logging.warning(f"Failed to update picture catalog: {e}")
 
@@ -1498,8 +1551,8 @@ def execute_action_tags(reply_text: str):
     for mem_content in mem_matches:
         update_memory_realtime(mem_content)
 
-    # 7. Custom Picture & Meme Dispatch (Supports [PICTURE: tag], [IMAGE: tag], [发图: 关键词], [发照片: 关键词])
-    pic_matches = re.findall(r'\[(?:PICTURE|picture|IMAGE|image|发图|发照片):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
+    # 7. Custom Picture & Meme Dispatch (Supports [PICTURE: tag], [IMAGE: tag], [发图: 关键词], [发贴图: 关键词], [发照片: 关键词])
+    pic_matches = re.findall(r'\[(?:PICTURE|picture|IMAGE|image|发图|发贴图|发照片):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
     for p_query in pic_matches:
         img_path = search_picture_database(p_query)
         if img_path and os.path.exists(img_path):
@@ -1510,17 +1563,41 @@ def execute_action_tags(reply_text: str):
                     "user_id": config["master_qq"],
                     "message": f"[CQ:image,file=base64://{b64_im}]"
                 })
-                logging.info(f"Dispatched custom picture from database: {os.path.basename(img_path)} (matched: '{p_query}')")
+                logging.info(f"Dispatched custom picture/sticker from library: {os.path.basename(img_path)} (matched: '{p_query}')")
             except Exception as pe:
                 logging.error(f"Failed to encode/send custom picture: {pe}")
         else:
-            logging.warning(f"Custom picture not found in library for query: '{p_query}'")
+            logging.warning(f"Custom picture/sticker not found in library for query: '{p_query}'")
+
+    # 8. Agent-managed Sticker/Picture Tagging & Saving
+    # (Supports [收藏表情: 标签: 描述], [保存表情: 标签: 描述], [收藏图片: 标签: 描述], [SAVE_STICKER: tags: desc])
+    save_matches = re.findall(r'\[(?:收藏表情|保存表情|添加表情|收藏图片|保存图片|SAVE_STICKER|save_sticker):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
+    for s_info in save_matches:
+        s_info = s_info.strip()
+        tags = []
+        summary = ""
+        if ":" in s_info or "：" in s_info:
+            sep = ":" if ":" in s_info else "："
+            parts = s_info.split(sep, 1)
+            tags_part = parts[0].strip()
+            summary = parts[1].strip()
+            tags = [t.strip() for t in re.split(r'[,，\s]+', tags_part) if t.strip()]
+        else:
+            tags = [t.strip() for t in re.split(r'[,，\s]+', s_info) if t.strip()]
+            summary = s_info
+
+        if latest_received_image_bytes:
+            save_to_picture_database(latest_received_image_bytes, sender_id=config["master_qq"], tags=tags, summary=summary)
+            logging.info(f"Agent autonomously added sticker/picture to library: tags={tags}, summary='{summary}'")
+        else:
+            logging.warning(f"Agent requested to save sticker ({tags}), but no image was found in recent conversation context.")
 
 def clean_tags(reply_text: str) -> str:
     text = re.sub(r'\[(?:发贴图|Send Sticker|Sticker|sticker):[^\]]+\]', '', reply_text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:发表情|Send Face|Face|face|Emoji|emoji):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:发语音|Send Voice|Voice|voice):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:PICTURE|picture|IMAGE|image|发图|发照片):[^\]]+\]', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[(?:收藏表情|保存表情|添加表情|收藏图片|保存图片|SAVE_STICKER|save_sticker):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:互动|Interact|interact):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:poke|Poke|like|Like)\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:更新记忆|Update Memory|update_memory|remember|Remember):[^\]]+\]', '', text, flags=re.IGNORECASE)
@@ -1950,6 +2027,8 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
         return
 
     clean_text, images_b64, has_voice = parse_incoming_cq_content(raw_text, sender_id=sender_id)
+    now_str = datetime.now().strftime("%H:%M:%S")
+    logging.info(f"Incoming message [{now_str}] (MsgID: {msg_id}) from {sender_id}: {clean_text[:120]}")
 
     with batch_lock:
         current_generation_id += 1
@@ -2059,13 +2138,20 @@ def poll_messages_loop():
     is_self_chat = str(config.get("bot_qq", "")) == str(config.get("master_qq", ""))
     if is_self_chat:
         logging.info("[*] Single-Account Self-Chat Mode active (bot_qq == master_qq). Filtering bot echoes automatically.")
+    else:
+        logging.info(f"[*] Two-Account Chat Mode active: Bot QQ ({config.get('bot_qq')}) <--> Master QQ ({config.get('master_qq')})")
 
+    startup_ts = time.time()
     try:
-        init_res = call_onebot_api("get_friend_msg_history", {"user_id": config["master_qq"], "count": 15})
+        init_res = call_onebot_api("get_friend_msg_history", {"user_id": config["master_qq"], "count": 20})
         if init_res.get("status") == "ok":
             for m in init_res.get("data", {}).get("messages", []):
                 mid = m.get("message_id")
-                if mid:
+                mtime = m.get("time", 0)
+                # Only mark older messages (>180s ago) as already processed.
+                # Messages sent within the last 180s (e.g. while starting up or restarting)
+                # are preserved so the bot can immediately process and answer them!
+                if mid and (startup_ts - mtime > 180):
                     processed_message_ids.add(mid)
     except Exception as e:
         logging.warning(f"Failed to seed initial messages: {e}")
@@ -2086,8 +2172,13 @@ def poll_messages_loop():
                                 processed_message_ids.add(mid)
                                 continue
                             on_message_arrived(mid, sender_id or config["master_qq"], text)
-                        elif sender_id == config["master_qq"]:
-                            on_message_arrived(mid, sender_id, text)
+                        else:
+                            # Standard two-account mode (like Gemini_as_catgirl)
+                            if sender_id == config["master_qq"]:
+                                on_message_arrived(mid, sender_id, text)
+                            else:
+                                # Mark bot's own sent messages as processed
+                                processed_message_ids.add(mid)
         except Exception as e:
             logging.warning(f"Poll loop exception: {e}")
         time.sleep(config.get("poll_interval_sec", 0.8))
