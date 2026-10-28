@@ -590,9 +590,22 @@ def raw_llm_call(prompt: str, max_tokens: int = 800) -> str:
         "max_tokens": max_tokens
     }
 
+    if REQUESTS_AVAILABLE:
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=45)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        except Exception as e:
+            logging.warning(f"raw_llm_call error via requests: {e}")
+
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=45) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+        raw_b = resp.read()
+        if raw_b.startswith(b'\x1f\x8b'):
+            import gzip
+            raw_b = gzip.decompress(raw_b)
+        data = json.loads(raw_b.decode("utf-8", errors="ignore"))
         return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
 def call_onebot_api(endpoint: str, payload: dict) -> dict:
@@ -1405,9 +1418,9 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
                             data = resp.json()
                             break
                         except Exception as je:
-                            logging.warning(f"LLM call attempt #{attempt+1} JSON decode error: {je}, body={resp.text[:200]}")
+                            logging.warning(f"LLM call attempt #{attempt+1} JSON decode error on {url}: {je}, body={resp.text[:200]}")
                     else:
-                        logging.warning(f"LLM call attempt #{attempt+1} failed ({resp.status_code}): {resp.text[:200]}")
+                        logging.warning(f"LLM call attempt #{attempt+1} failed ({resp.status_code}) on {url}: {resp.text[:200]}")
                 else:
                     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
                     with urllib.request.urlopen(req, timeout=35) as resp:
