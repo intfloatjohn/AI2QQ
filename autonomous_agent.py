@@ -844,16 +844,7 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
 
     max_tokens_val = int(config.get("max_tokens", 1200))
     max_tool_turns = 5
-
-    # Auto-normalize model names for known providers (e.g. DeepSeek official API)
-    model_name = config.get("model", "google/gemini-3.8-flash")
-    if "deepseek.com" in base:
-        if model_name.lower() in ["deepseek-flash", "deepseek", "deepseek-v3", "deepseekv3"]:
-            logging.info(f"Auto-normalizing DeepSeek model: '{model_name}' -> 'deepseek-chat'")
-            model_name = "deepseek-chat"
-        elif model_name.lower() in ["deepseek-r1", "deepseekr1", "r1"]:
-            logging.info(f"Auto-normalizing DeepSeek model: '{model_name}' -> 'deepseek-reasoner'")
-            model_name = "deepseek-reasoner"
+    model_name = config.get("model", "deepseek-flash")
 
     # ReAct tool-execution loop (up to 5 turns)
     for iteration in range(max_tool_turns):
