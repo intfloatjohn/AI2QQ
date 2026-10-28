@@ -9,3 +9,5 @@ ddgs>=9.0.0
 mcp>=2.0.0
 qrcode>=7.4.2
 pillow>=9.0.0
+pypdf>=3.0.0
+python-docx>=0.8.11

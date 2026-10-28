@@ -19,5 +19,13 @@
   "max_search_results": 4,
   "log_level": "INFO",
   "enable_voice_reply": false,
-  "voice_character": "zh-CN-XiaoyiNeural"
+  "voice_character": "zh-CN-XiaoyiNeural",
+  "enable_file_parser": true,
+  "prefer_native_file_parser": true,
+  "enable_voice_recognition": true,
+  "prefer_native_voice_recognition": true,
+  "enable_picture_database": true,
+  "enable_multi_bubble_reply": true,
+  "multi_bubble_delay_sec": 1.2,
+  "enable_autonomous_refusal": true
 }

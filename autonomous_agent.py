@@ -29,6 +29,8 @@ import datetime
 import traceback
 import threading
 import subprocess
+import hashlib
+import zipfile
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -54,6 +56,9 @@ CHAT_LOG_FILE = os.path.join(BASE_DIR, "chat_history.jsonl")
 MEMORY_SUMMARY_FILE = os.path.join(BASE_DIR, "memory_summary.txt")
 LOG_FILE = os.path.join(BASE_DIR, "agent.log")
 STICKERS_DIR = os.path.join(BASE_DIR, "stickers")
+PICTURE_DB_DIR = os.path.join(BASE_DIR, "picture_db")
+PICTURE_IMAGES_DIR = os.path.join(PICTURE_DB_DIR, "images")
+PICTURE_CATALOG_FILE = os.path.join(PICTURE_DB_DIR, "catalog.json")
 
 config = {
     "api_type": "openai",
@@ -75,7 +80,15 @@ config = {
     "max_search_results": 4,
     "log_level": "INFO",
     "enable_voice_reply": False,
-    "voice_character": "zh-CN-XiaoyiNeural"
+    "voice_character": "zh-CN-XiaoyiNeural",
+    "enable_file_parser": True,
+    "prefer_native_file_parser": True,
+    "enable_voice_recognition": True,
+    "prefer_native_voice_recognition": True,
+    "enable_picture_database": True,
+    "enable_multi_bubble_reply": True,
+    "multi_bubble_delay_sec": 1.2,
+    "enable_autonomous_refusal": True
 }
 
 def load_config():
@@ -112,12 +125,30 @@ QQ_FACES = {
     "委屈": 106, "可爱": 21, "微笑": 14, "比心": 319, "爱心": 66,
     "猫猫": 307, "喵喵": 307, "调皮": 12, "眨眼": 172,
     "呲牙": 13, "偷笑": 20, "流泪": 5, "睡": 8, "期待": 294,
+    "发呆": 3, "得意": 4, "惊讶": 0, "大哭": 9, "尴尬": 10,
+    "发怒": 11, "难过": 15, "酷": 16, "抓狂": 18, "白眼": 32,
+    "傲慢": 33, "困": 35, "流汗": 37, "憨笑": 38, "悠闲": 39,
+    "点赞": 172, "托腮": 175, "斜眼笑": 178, "打call": 260,
+    "大笑": 267, "无语": 270,
     # English
     "hug": 222, "cuddle": 219, "pat": 219, "shy": 6, "blush": 6,
     "kiss": 109, "pout": 106, "cute": 21, "smile": 14,
     "heart": 319, "love": 66, "cat": 307, "wink": 172, "laugh": 13, "grin": 13,
     "cry": 5, "sleep": 8, "sleepy": 8
 }
+
+QQ_FACE_ID_TO_NAME = {
+    0: "惊讶", 1: "撇嘴", 2: "色", 3: "发呆", 4: "得意", 5: "流泪", 6: "害羞", 7: "闭嘴",
+    8: "睡", 9: "大哭", 10: "尴尬", 11: "发怒", 12: "调皮", 13: "呲牙", 14: "微笑",
+    16: "酷", 18: "抓狂", 20: "偷笑", 21: "可爱", 24: "偷笑", 28: "亲亲", 32: "白眼",
+    33: "傲慢", 35: "困", 37: "流汗", 38: "憨笑", 39: "悠闲", 49: "拥抱", 66: "爱心",
+    74: "太阳", 75: "月亮", 76: "强", 79: "胜利", 85: "爱心", 86: "心碎", 106: "委屈",
+    109: "亲亲", 124: "摸头", 172: "点赞", 175: "托腮", 178: "斜眼笑", 212: "比心",
+    219: "贴贴", 222: "抱抱", 260: "打call", 262: "汪汪", 267: "大笑", 270: "无语",
+    294: "期待", 307: "猫猫", 319: "比心"
+}
+
+RPS_MAP = {1: "石头", 2: "剪刀", 3: "布"}
 
 conversation_history = []
 long_term_memory = ""
@@ -186,6 +217,23 @@ AVAILABLE_TOOLS = [
                     }
                 },
                 "required": ["content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_picture_library",
+            "description": "搜索个人图片库与表情包库，查找匹配的图片文件以便发送给对方 (Search picture library)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "想要查找的图片或表情包标签/关键词 (Tag or keyword to search)"
+                    }
+                },
+                "required": ["query"]
             }
         }
     }
@@ -562,53 +610,504 @@ def call_onebot_api(endpoint: str, payload: dict) -> dict:
         logging.error(f"OneBot API {endpoint} error: {e}")
         return {"status": "error", "message": str(e)}
 
-def download_image_as_base64(img_url: str, file_id: str = "") -> str:
+def download_image_data(img_url: str, file_id: str = "") -> tuple:
+    """Downloads image and returns (base64_str, raw_bytes)."""
     clean_url = html.unescape(img_url)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://qun.qq.com/"
     }
+    raw_bytes = b""
     try:
         req = urllib.request.Request(clean_url, headers=headers)
         with urllib.request.urlopen(req, timeout=12) as resp:
             data = resp.read()
             if len(data) > 100:
-                return base64.b64encode(data).decode("utf-8")
+                raw_bytes = data
     except Exception as e:
         logging.warning(f"Direct download failed ({e}), checking OneBot local cache for file={file_id}...")
 
-    if file_id:
+    if not raw_bytes and file_id:
         try:
             res = call_onebot_api("get_image", {"file": file_id})
             if res.get("status") == "ok":
                 local_path = res.get("data", {}).get("file", "")
                 if local_path and os.path.exists(local_path):
                     with open(local_path, "rb") as f:
-                        return base64.b64encode(f.read()).decode("utf-8")
+                        raw_bytes = f.read()
         except Exception as e:
             logging.error(f"Fallback get_image failed: {e}")
+
+    if raw_bytes:
+        return base64.b64encode(raw_bytes).decode("utf-8"), raw_bytes
+    return "", b""
+
+def download_image_as_base64(img_url: str, file_id: str = "") -> str:
+    b64, _ = download_image_data(img_url, file_id)
+    return b64
+
+# ==============================================================================
+# Feature 5: Visual Memory & Custom Picture Database
+# ==============================================================================
+def init_picture_database():
+    """Initializes picture database directory and catalog index."""
+    os.makedirs(PICTURE_IMAGES_DIR, exist_ok=True)
+    if not os.path.exists(PICTURE_CATALOG_FILE):
+        try:
+            with open(PICTURE_CATALOG_FILE, "w", encoding="utf-8") as f:
+                json.dump([], f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logging.warning(f"Failed to initialize picture catalog: {e}")
+
+def save_to_picture_database(image_bytes: bytes, sender_id: int = 0, tags: list = None, summary: str = "", filename: str = "") -> dict:
+    """Saves a picture into the local library, deduplicating via SHA256 and indexing in catalog.json."""
+    if not image_bytes or len(image_bytes) < 200:
+        return {}
+    init_picture_database()
+    sha = hashlib.sha256(image_bytes).hexdigest()[:16]
+    ext = ".jpg"
+    if image_bytes.startswith(b"\x89PNG"):
+        ext = ".png"
+    elif image_bytes.startswith(b"GIF8"):
+        ext = ".gif"
+    elif image_bytes.startswith(b"RIFF") and b"WEBP" in image_bytes[:12]:
+        ext = ".webp"
+
+    dest_filename = f"pic_{sha}{ext}"
+    dest_path = os.path.join(PICTURE_IMAGES_DIR, dest_filename)
+    if not os.path.exists(dest_path):
+        try:
+            with open(dest_path, "wb") as f:
+                f.write(image_bytes)
+        except Exception as e:
+            logging.warning(f"Failed to write image to picture library: {e}")
+            return {}
+
+    entry = {
+        "id": sha,
+        "filename": dest_filename,
+        "path": os.path.relpath(dest_path, BASE_DIR),
+        "timestamp": int(time.time()),
+        "sender_id": sender_id,
+        "tags": tags or [],
+        "summary": summary or ""
+    }
+
+    try:
+        catalog = []
+        if os.path.exists(PICTURE_CATALOG_FILE):
+            with open(PICTURE_CATALOG_FILE, "r", encoding="utf-8") as f:
+                catalog = json.load(f)
+                if not isinstance(catalog, list):
+                    catalog = []
+        if not any(item.get("id") == sha for item in catalog):
+            catalog.append(entry)
+            if len(catalog) > 1000:
+                catalog = catalog[-1000:]
+            with open(PICTURE_CATALOG_FILE, "w", encoding="utf-8") as f:
+                json.dump(catalog, f, indent=2, ensure_ascii=False)
+            logging.info(f"Saved new image to picture database: {dest_filename} (tags: {tags})")
+    except Exception as e:
+        logging.warning(f"Failed to update picture catalog: {e}")
+
+    return entry
+
+def search_picture_database(query: str) -> str:
+    """Searches picture_db catalog and stickers directory for a picture matching query. Returns absolute path."""
+    q = query.strip().lower()
+    if not q:
+        return ""
+
+    # 1. Search in picture_db catalog
+    init_picture_database()
+    if os.path.exists(PICTURE_CATALOG_FILE):
+        try:
+            with open(PICTURE_CATALOG_FILE, "r", encoding="utf-8") as f:
+                catalog = json.load(f)
+                for item in reversed(catalog):
+                    tags = [t.lower() for t in item.get("tags", [])]
+                    summary = item.get("summary", "").lower()
+                    fname = item.get("filename", "").lower()
+                    if q in tags or any(q in t or t in q for t in tags) or q in summary or q in fname:
+                        rel_path = item.get("path", "")
+                        abs_p = os.path.join(BASE_DIR, rel_path)
+                        if os.path.exists(abs_p):
+                            return abs_p
+        except Exception as e:
+            logging.debug(f"Catalog search error: {e}")
+
+    # 2. Search in stickers directory
+    if os.path.exists(STICKERS_DIR):
+        for fname in os.listdir(STICKERS_DIR):
+            base, _ = os.path.splitext(fname)
+            if q in base.lower() or base.lower() in q:
+                return os.path.join(STICKERS_DIR, fname)
+        for alias_key, alias_list in STICKER_ALIASES.items():
+            if q in alias_list or q == alias_key:
+                for fname in os.listdir(STICKERS_DIR):
+                    base, _ = os.path.splitext(fname)
+                    if any(a.lower() in base.lower() for a in alias_list):
+                        return os.path.join(STICKERS_DIR, fname)
     return ""
 
-def parse_incoming_cq_content(raw_text: str):
-    cq_img_pattern = re.compile(r'\[CQ:image,[^\]]*?\]', re.IGNORECASE)
+# ==============================================================================
+# Feature 1: Forwarded / Combined Chat History Resolution
+# ==============================================================================
+def fetch_forward_messages(forward_id: str, depth: int = 1) -> str:
+    """Fetch and parse OneBot 11 combined/forwarded chat history nodes."""
+    if not forward_id:
+        return ""
+    try:
+        res = call_onebot_api("get_forward_msg", {"id": forward_id})
+        if res.get("status") != "ok":
+            res = call_onebot_api("get_forward_msg", {"message_id": forward_id})
+
+        messages = res.get("data", {}).get("messages", [])
+        if not messages and isinstance(res.get("data"), list):
+            messages = res.get("data")
+
+        if not messages:
+            return f"[合并转发聊天记录: 内容为空或未获取到 (ID: {forward_id})]"
+
+        formatted_nodes = []
+        for idx, node in enumerate(messages[:30], 1):
+            sender_info = node.get("sender", {})
+            sender_name = sender_info.get("nickname") or sender_info.get("card") or f"用户{sender_info.get('user_id', '未知')}"
+
+            node_time = node.get("time")
+            time_str = ""
+            if node_time:
+                try:
+                    time_str = datetime.datetime.fromtimestamp(node_time).strftime("%H:%M:%S")
+                except Exception:
+                    pass
+            time_tag = f" ({time_str})" if time_str else ""
+
+            content = node.get("content") or node.get("message") or ""
+            parsed_content = ""
+            if isinstance(content, list):
+                node_texts = []
+                for seg in content:
+                    stype = seg.get("type")
+                    sdata = seg.get("data", {})
+                    if stype == "text":
+                        node_texts.append(sdata.get("text", ""))
+                    elif stype == "image":
+                        node_texts.append("[图片]")
+                    elif stype == "face":
+                        fid = int(sdata.get("id", -1))
+                        fname = QQ_FACE_ID_TO_NAME.get(fid, str(fid))
+                        node_texts.append(f"[表情: {fname}]")
+                    elif stype == "record":
+                        node_texts.append("[语音]")
+                    elif stype == "forward" and depth < 2:
+                        node_texts.append(fetch_forward_messages(sdata.get("id", ""), depth=depth + 1))
+                    elif stype == "file":
+                        node_texts.append(f"[文件: {sdata.get('name', '未命名')}]")
+                    elif stype == "marketface":
+                        node_texts.append(f"[动画大表情: {sdata.get('summary', '表情')}]")
+                    else:
+                        node_texts.append(f"[{stype}]")
+                parsed_content = "".join(node_texts).strip()
+            elif isinstance(content, str):
+                parsed_content = content
+                if "[CQ:forward" in parsed_content and depth < 2:
+                    sub_fwd = re.search(r'\[CQ:forward,id=([^\],]+)\]', parsed_content)
+                    if sub_fwd:
+                        parsed_content = fetch_forward_messages(sub_fwd.group(1), depth=depth + 1)
+                parsed_content = re.sub(r'\[CQ:image,[^\]]*\]', '[图片]', parsed_content)
+                parsed_content = re.sub(r'\[CQ:record,[^\]]*\]', '[语音]', parsed_content)
+                parsed_content = re.sub(r'\[CQ:marketface,[^\]]*summary=([^\],]+)[^\]]*\]', r'[动画大表情: \1]', parsed_content)
+                parsed_content = re.sub(r'\[CQ:[^\]]*\]', '', parsed_content).strip()
+
+            formatted_nodes.append(f"  {idx}. {sender_name}{time_tag}: {parsed_content}")
+
+        total_count = len(messages)
+        header = f"[合并转发聊天记录 (共 {total_count} 条)]:\n"
+        return header + "\n".join(formatted_nodes)
+    except Exception as e:
+        logging.warning(f"Error resolving forward message {forward_id}: {e}")
+        return f"[合并转发聊天记录: 解析异常 (ID: {forward_id})]"
+
+# ==============================================================================
+# Feature 3: Multi-Format Document / File Parser (.doc, .pdf, .mp3, .txt, etc.)
+# ==============================================================================
+def extract_text_from_file(file_path: str, max_chars: int = 3500) -> str:
+    """Extracts human-readable text from documents (.txt, .md, .pdf, .docx, .json, etc.)."""
+    if not os.path.exists(file_path):
+        return ""
+    _, ext = os.path.splitext(file_path)
+    ext = ext.lower()
+
+    # 1. Plain text and source code
+    text_exts = {".txt", ".md", ".json", ".csv", ".log", ".py", ".c", ".cpp", ".h", ".sh", ".html", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".rst", ".sql"}
+    if ext in text_exts:
+        for enc in ["utf-8", "gb18030", "gbk", "utf-16", "latin-1"]:
+            try:
+                with open(file_path, "r", encoding=enc, errors="replace") as f:
+                    content = f.read(max_chars * 2)
+                    return content[:max_chars].strip()
+            except Exception:
+                continue
+
+    # 2. PDF extraction (using pypdf or fallback)
+    if ext == ".pdf":
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(file_path)
+            pages_text = []
+            for page in reader.pages[:10]:
+                t = page.extract_text()
+                if t:
+                    pages_text.append(t)
+                if sum(len(p) for p in pages_text) >= max_chars:
+                    break
+            extracted = "\n".join(pages_text).strip()
+            if extracted:
+                return extracted[:max_chars]
+        except Exception as e:
+            logging.warning(f"pypdf extraction failed for {file_path}: {e}")
+
+    # 3. DOCX extraction (python-docx or built-in zipfile fallback)
+    if ext == ".docx":
+        try:
+            import docx
+            doc = docx.Document(file_path)
+            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+            extracted = "\n".join(paragraphs).strip()
+            if extracted:
+                return extracted[:max_chars]
+        except Exception:
+            try:
+                with zipfile.ZipFile(file_path) as z:
+                    xml_content = z.read("word/document.xml").decode("utf-8")
+                    text_parts = re.findall(r'<w:t[^>]*>(.*?)</w:t>', xml_content)
+                    return "".join(text_parts)[:max_chars].strip()
+            except Exception as e:
+                logging.warning(f"DOCX extraction fallback failed: {e}")
+
+    return ""
+
+def process_incoming_file(file_id: str, file_name: str = "", file_size: int = 0, file_url: str = "") -> str:
+    """Download/locate incoming file, extract readable text, and format for the model."""
+    if not config.get("enable_file_parser", True):
+        return f"[收到文件: {file_name or file_id}]"
+
+    local_path = ""
+    if file_id:
+        try:
+            res = call_onebot_api("get_file", {"file_id": file_id})
+            if res.get("status") == "ok":
+                local_path = res.get("data", {}).get("file", "")
+                if not file_url:
+                    file_url = res.get("data", {}).get("url", "")
+        except Exception as e:
+            logging.debug(f"get_file API error: {e}")
+
+    if (not local_path or not os.path.exists(local_path)) and file_url:
+        try:
+            temp_dir = os.path.join(BASE_DIR, "downloads")
+            os.makedirs(temp_dir, exist_ok=True)
+            safe_name = os.path.basename(file_name) if file_name else f"file_{file_id}"
+            local_path = os.path.join(temp_dir, safe_name)
+            req = urllib.request.Request(file_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                with open(local_path, "wb") as out_f:
+                    out_f.write(resp.read())
+        except Exception as e:
+            logging.warning(f"Download file from URL failed: {e}")
+
+    size_str = ""
+    if file_size > 0:
+        if file_size < 1024:
+            size_str = f"{file_size} B"
+        elif file_size < 1024 * 1024:
+            size_str = f"{file_size / 1024:.1f} KB"
+        else:
+            size_str = f"{file_size / (1024 * 1024):.1f} MB"
+    elif local_path and os.path.exists(local_path):
+        actual_size = os.path.getsize(local_path)
+        size_str = f"{actual_size / (1024 * 1024):.1f} MB" if actual_size > 1024 * 1024 else f"{actual_size / 1024:.1f} KB"
+
+    display_name = file_name or (os.path.basename(local_path) if local_path else file_id)
+    if not local_path or not os.path.exists(local_path):
+        return f"[收到文件: {display_name} ({size_str})]" if size_str else f"[收到文件: {display_name}]"
+
+    text_content = extract_text_from_file(local_path, max_chars=config.get("max_file_text_chars", 3500))
+    if text_content:
+        return f"[接收到文件: {display_name} ({size_str}) | 文件内容摘要提取:\n```\n{text_content}\n```]"
+    else:
+        return f"[接收到文件: {display_name} ({size_str}) (非纯文本格式文件)]"
+
+# ==============================================================================
+# Feature 4: Inbound Voice Recognition (ASR)
+# ==============================================================================
+def transcribe_voice_audio(audio_path: str) -> str:
+    """Transcribes an audio file into text using available local/cloud ASR engines."""
+    if not os.path.exists(audio_path):
+        return ""
+
+    # 1. SpeechRecognition with Google / local engine
+    try:
+        import speech_recognition as sr
+        r = sr.Recognizer()
+        wav_path = audio_path
+        created_wav = False
+        if not audio_path.lower().endswith(".wav"):
+            wav_path = audio_path + ".wav"
+            subprocess.run(["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", wav_path],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            created_wav = True
+
+        if os.path.exists(wav_path):
+            with sr.AudioFile(wav_path) as source:
+                audio_data = r.record(source)
+                text = r.recognize_google(audio_data, language="zh-CN")
+                if created_wav and os.path.exists(wav_path):
+                    try: os.remove(wav_path)
+                    except Exception: pass
+                if text:
+                    return text.strip()
+    except Exception as e:
+        logging.debug(f"SpeechRecognition ASR not available or error: {e}")
+
+    # 2. Local Whisper if installed
+    try:
+        import whisper
+        w_model = whisper.load_model("tiny")
+        res = w_model.transcribe(audio_path)
+        text = res.get("text", "").strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    return ""
+
+def process_incoming_voice(file_id: str, file_url: str = "") -> str:
+    """Download incoming voice message, convert and transcribe via ASR."""
+    if not config.get("enable_voice_recognition", True):
+        return "（收到一条语音消息）"
+
+    local_path = ""
+    if file_id:
+        try:
+            res = call_onebot_api("get_record", {"file": file_id, "out_format": "mp3"})
+            if res.get("status") == "ok":
+                local_path = res.get("data", {}).get("file", "")
+                if not file_url:
+                    file_url = res.get("data", {}).get("url", "")
+        except Exception as e:
+            logging.debug(f"get_record API error: {e}")
+
+    if (not local_path or not os.path.exists(local_path)) and file_url:
+        try:
+            temp_dir = os.path.join(BASE_DIR, "downloads")
+            os.makedirs(temp_dir, exist_ok=True)
+            local_path = os.path.join(temp_dir, f"voice_{file_id}.mp3")
+            req = urllib.request.Request(file_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                with open(local_path, "wb") as out_f:
+                    out_f.write(resp.read())
+        except Exception as e:
+            logging.warning(f"Download voice from URL failed: {e}")
+
+    if local_path and os.path.exists(local_path):
+        transcription = transcribe_voice_audio(local_path)
+        if transcription:
+            return f"[语音消息 (已转文字): \"{transcription}\"]"
+
+    return "（收到一条语音消息）"
+
+# ==============================================================================
+# Comprehensive Incoming Message Parser (Super Emojis, GIFs, Forwards, Files, Voice)
+# ==============================================================================
+def parse_incoming_cq_content(raw_text: str, sender_id: int = 0):
     images_b64 = []
+
+    # 1. Resolve Combined / Forwarded Chat History [CQ:forward,id=...]
+    fwd_matches = re.findall(r'\[CQ:forward,id=([^\],]+)\]', raw_text, re.IGNORECASE)
+    for fwd_id in fwd_matches:
+        fwd_content = fetch_forward_messages(fwd_id)
+        raw_text = re.sub(rf'\[CQ:forward,id={re.escape(fwd_id)}\]', f"\n{fwd_content}\n", raw_text)
+
+    # 2. Resolve Super Emojis & Marketface [CQ:marketface,id=...,summary=...]
+    for mf in re.finditer(r'\[CQ:marketface,[^\]]*?\]', raw_text, re.IGNORECASE):
+        tag = mf.group(0)
+        summary_m = re.search(r'summary=([^\],]+)', tag)
+        summary = summary_m.group(1).strip() if summary_m else "动画大表情"
+        raw_text = raw_text.replace(tag, f"[动画表情: {summary}]")
+
+    # 3. Interactive Faces: Dice & RPS
+    for dice in re.finditer(r'\[CQ:dice,value=([0-9]+)[^\]]*\]', raw_text, re.IGNORECASE):
+        raw_text = raw_text.replace(dice.group(0), f"[掷出骰子: {dice.group(1)}点]")
+    for rps in re.finditer(r'\[CQ:rps,[^\]]*?(?:value|type)=([1-3])[^\]]*\]', raw_text, re.IGNORECASE):
+        val = int(rps.group(1))
+        raw_text = raw_text.replace(rps.group(0), f"[猜拳出拳: {RPS_MAP.get(val, '出拳')}]")
+
+    # 4. QQ Native Faces [CQ:face,id=...]
+    for face in re.finditer(r'\[CQ:face,id=([0-9]+)[^\]]*\]', raw_text, re.IGNORECASE):
+        fid = int(face.group(1))
+        fname = QQ_FACE_ID_TO_NAME.get(fid, f"#{fid}")
+        raw_text = raw_text.replace(face.group(0), f"[QQ表情: {fname}]")
+
+    # 5. Nudge / Poke [CQ:poke,...]
+    raw_text = re.sub(r'\[CQ:poke,[^\]]*\]', '[戳了戳你]', raw_text, flags=re.IGNORECASE)
+
+    # 6. Incoming Files [CQ:file,id=...,name=...,size=...,url=...]
+    for f_match in re.finditer(r'\[CQ:file,[^\]]*?\]', raw_text, re.IGNORECASE):
+        tag = f_match.group(0)
+        fid = (re.search(r'file_id=([^\],]+)', tag) or re.search(r'id=([^\],]+)', tag) or re.search(r'file=([^\],]+)', tag))
+        fid_val = fid.group(1).strip() if fid else ""
+        fname_m = re.search(r'name=([^\],]+)', tag)
+        fname_val = fname_m.group(1).strip() if fname_m else ""
+        fsize_m = re.search(r'size=([0-9]+)', tag)
+        fsize_val = int(fsize_m.group(1)) if fsize_m else 0
+        furl_m = re.search(r'url=([^\],]+)', tag)
+        furl_val = furl_m.group(1).strip() if furl_m else ""
+        file_desc = process_incoming_file(fid_val, fname_val, fsize_val, furl_val)
+        raw_text = raw_text.replace(tag, f"\n{file_desc}\n")
+
+    # 7. Incoming Voice Messages [CQ:record,file=...,url=...]
+    has_voice = "[CQ:record" in raw_text
+    for v_match in re.finditer(r'\[CQ:record,[^\]]*?\]', raw_text, re.IGNORECASE):
+        tag = v_match.group(0)
+        v_fid = re.search(r'file=([^\],]+)', tag)
+        v_fid_val = v_fid.group(1).strip() if v_fid else ""
+        v_url = re.search(r'url=([^\],]+)', tag)
+        v_url_val = v_url.group(1).strip() if v_url else ""
+        voice_desc = process_incoming_voice(v_fid_val, v_url_val)
+        raw_text = raw_text.replace(tag, voice_desc)
+
+    # 8. Images & GIF / Sticker Detection [CQ:image,...]
+    cq_img_pattern = re.compile(r'\[CQ:image,[^\]]*?\]', re.IGNORECASE)
     for match in cq_img_pattern.finditer(raw_text):
         tag = match.group(0)
         url_match = re.search(r'url=([^\],]+)', tag)
         file_match = re.search(r'file=([^\],]+)', tag)
+        sub_type_match = re.search(r'subType=([0-9]+)', tag)
+        summary_match = re.search(r'summary=([^\],]+)', tag)
+
         url = url_match.group(1).strip() if url_match else ""
         file_id = file_match.group(1).strip() if file_match else ""
+        sub_type = sub_type_match.group(1).strip() if sub_type_match else ""
+        summary = summary_match.group(1).strip() if summary_match else ""
+
+        is_gif_or_sticker = sub_type == "1" or ".gif" in url.lower() or ".gif" in file_id.lower() or "动画表情" in summary or "表情" in summary
+
         if url:
-            b64 = download_image_as_base64(url, file_id)
+            b64, raw_b = download_image_data(url, file_id)
             if b64:
                 images_b64.append(b64)
+            # Auto-save to picture database
+            if raw_b and config.get("enable_picture_database", True):
+                tags = ["表情包", "动图"] if is_gif_or_sticker else ["照片", "用户发送"]
+                save_to_picture_database(raw_b, sender_id=sender_id, tags=tags, summary=summary or ("表情包" if is_gif_or_sticker else "图片"))
 
-    clean_text = cq_img_pattern.sub('', raw_text)
-    has_voice = "[CQ:record" in clean_text
-    lang = config.get("language", "zh").lower()
-    voice_note = " (sent a voice message) " if lang == "en" else "（收到语音消息）"
-    clean_text = re.sub(r'\[CQ:record,[^\]]+\]', voice_note, clean_text)
-    clean_text = re.sub(r'\[CQ:[^\]]+\]', '', clean_text).strip()
+        label = "[表情包/动图]" if is_gif_or_sticker else "[图片]"
+        raw_text = raw_text.replace(tag, label)
+
+    clean_text = re.sub(r'\[CQ:[^\]]+\]', '', raw_text).strip()
     return clean_text, images_b64, has_voice
 
 def sanitize_reply(text: str) -> str:
@@ -745,16 +1244,36 @@ def execute_action_tags(reply_text: str):
     for mem_content in mem_matches:
         update_memory_realtime(mem_content)
 
+    # 7. Custom Picture & Meme Dispatch (Supports [PICTURE: tag], [IMAGE: tag], [发图: 关键词], [发照片: 关键词])
+    pic_matches = re.findall(r'\[(?:PICTURE|picture|IMAGE|image|发图|发照片):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
+    for p_query in pic_matches:
+        img_path = search_picture_database(p_query)
+        if img_path and os.path.exists(img_path):
+            try:
+                with open(img_path, "rb") as imf:
+                    b64_im = base64.b64encode(imf.read()).decode("utf-8")
+                call_onebot_api("send_private_msg", {
+                    "user_id": config["master_qq"],
+                    "message": f"[CQ:image,file=base64://{b64_im}]"
+                })
+                logging.info(f"Dispatched custom picture from database: {os.path.basename(img_path)} (matched: '{p_query}')")
+            except Exception as pe:
+                logging.error(f"Failed to encode/send custom picture: {pe}")
+        else:
+            logging.warning(f"Custom picture not found in library for query: '{p_query}'")
+
 def clean_tags(reply_text: str) -> str:
     text = re.sub(r'\[(?:发贴图|Send Sticker|Sticker|sticker):[^\]]+\]', '', reply_text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:发表情|Send Face|Face|face|Emoji|emoji):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:发语音|Send Voice|Voice|voice):[^\]]+\]', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[(?:PICTURE|picture|IMAGE|image|发图|发照片):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:互动|Interact|interact):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:poke|Poke|like|Like)\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:更新记忆|Update Memory|update_memory|remember|Remember):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:查看记忆|Read Memory|read_memory|Memory|memory)\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:搜索|Search|search|web_search):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:搜索聊天记录|Search History|search_history|history):[^\]]+\]', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[(?:NO_REPLY|no_reply|SILENCE|silence)\]', '', text, flags=re.IGNORECASE)
     return text.strip()
 
 def execute_tool_call(tool_name: str, arguments: dict, gen_id: int = 0) -> str:
@@ -775,6 +1294,13 @@ def execute_tool_call(tool_name: str, arguments: dict, gen_id: int = 0) -> str:
         elif tool_name == "update_memory":
             content = arguments.get("content", "")
             return update_memory_realtime(content)
+        elif tool_name == "search_picture_library":
+            q = arguments.get("query", "")
+            img_p = search_picture_database(q)
+            if img_p:
+                return f"找到匹配图片: {os.path.basename(img_p)}。若需发送给对方，可在回复中加入 [PICTURE: {q}]。"
+            else:
+                return f"图片库中未找到与 '{q}' 相关的图片。"
         else:
             return f"Unknown tool: {tool_name}"
     except Exception as e:
@@ -1108,23 +1634,45 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
 
         logging.info(f"Agent [{now_str}]: {reply}")
 
+        # Check for autonomous refusal ([NO_REPLY] / [SILENCE])
+        clean_stripped = reply.strip()
+        if clean_stripped in ["[NO_REPLY]", "[SILENCE]"] or clean_stripped.startswith("[NO_REPLY]") or clean_stripped.startswith("【NO_REPLY】"):
+            logging.info("[System message] Model refused to reply (Persona silent/arrogant mode)")
+            print("\n>>> [System message] Model refused to reply <<<\n")
+            append_to_full_chat_history("assistant", "[Model refused to reply]", sender_id=config.get("bot_qq"))
+            with batch_lock:
+                if gen_id == current_generation_id and not pending_messages and not in_flight_messages:
+                    current_generation_id = 0
+            return
+
         # Record to persistent memory & chat logs ONLY for the confirmed winning reply
         record_chat_turn(history_record_text, reply, has_image=bool(all_images))
 
-        # Execute actions (stickers, QQ faces, voice, poke, memory updates)
+        # Execute actions (custom pictures, stickers, QQ faces, voice, poke, memory updates)
         execute_action_tags(reply)
 
         clean_text_reply = clean_tags(reply)
         if clean_text_reply:
             recent_bot_replies.append(clean_text_reply)
-            res = call_onebot_api("send_private_msg", {
-                "user_id": config["master_qq"],
-                "message": clean_text_reply
-            })
-            if isinstance(res, dict) and res.get("status") == "ok":
-                bot_mid = res.get("data", {}).get("message_id")
-                if bot_mid:
-                    processed_message_ids.add(bot_mid)
+
+            # Multi-bubble message sending: split by [SEP] delimiter
+            if "[SEP]" in clean_text_reply and config.get("enable_multi_bubble_reply", True):
+                bubbles = [b.strip() for b in clean_text_reply.split("[SEP]") if b.strip()]
+            else:
+                bubbles = [clean_text_reply]
+
+            delay_sec = config.get("multi_bubble_delay_sec", 1.2)
+            for idx, bubble in enumerate(bubbles):
+                res = call_onebot_api("send_private_msg", {
+                    "user_id": config["master_qq"],
+                    "message": bubble
+                })
+                if isinstance(res, dict) and res.get("status") == "ok":
+                    bot_mid = res.get("data", {}).get("message_id")
+                    if bot_mid:
+                        processed_message_ids.add(bot_mid)
+                if idx < len(bubbles) - 1 and delay_sec > 0:
+                    time.sleep(delay_sec)
 
         # Re-initialize the race generation counter back to 0 once all active queues are idle
         with batch_lock:
@@ -1152,7 +1700,7 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
     if not is_self_chat and sender_id != config["master_qq"]:
         return
 
-    clean_text, images_b64, has_voice = parse_incoming_cq_content(raw_text)
+    clean_text, images_b64, has_voice = parse_incoming_cq_content(raw_text, sender_id=sender_id)
 
     with batch_lock:
         current_generation_id += 1
@@ -1235,6 +1783,10 @@ def main():
     logging.info(f"[*] Auto-Compact    : Enabled (Threshold: {config.get('compact_threshold')} turns)")
     logging.info(f"[*] Debounce Window : {config.get('debounce_delay_sec')}s")
     logging.info(f"[*] Max Tokens      : {config.get('max_tokens')}")
+    logging.info(f"[*] Visual Database : Enabled ({PICTURE_DB_DIR})")
+    logging.info(f"[*] File Parser     : {'Enabled (Native + Local Fallback)' if config.get('enable_file_parser', True) else 'Disabled'}")
+    logging.info(f"[*] Voice Recog     : {'Enabled' if config.get('enable_voice_recognition', True) else 'Disabled'}")
+    logging.info(f"[*] Multi-Bubble Msg: {'Enabled ([SEP])' if config.get('enable_multi_bubble_reply', True) else 'Disabled'}")
     logging.info(f"[*] Persona Source  : {os.path.join(PERSONA_DIR, 'system_prompt_' + config.get('language', 'zh') + '.md')}")
     logging.info("=" * 65)
 

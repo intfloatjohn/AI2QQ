@@ -21,6 +21,9 @@ memory_summary.txt
 temp_reply.mp3
 temp_mcp_reply.mp3
 *.mp3
+downloads/
+picture_db/images/*
+!picture_db/images/.gitkeep
 
 # Operating System files
 .DS_Store
