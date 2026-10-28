@@ -602,16 +602,15 @@ def trigger_auto_compact():
         logging.error(f"AutoCompact failed: {e}")
 
 def get_llm_url() -> str:
-    """Returns the LLM API endpoint without unexpected auto-completion."""
+    """Returns the LLM API endpoint without unexpected auto-completion.
+    - If user provides a full endpoint (e.g. ends with /chat/completions), keep verbatim.
+    - If user provides a bare base URL (e.g. 'https://api.deepseek.com'), append '/chat/completions'
+      without forcing any '/v1' prefix.
+    """
     base = config.get("base_url", "https://openrouter.ai/api/v1/chat/completions").strip()
     if any(endpoint in base for endpoint in ["/chat/completions", "/completions", "/messages", "/generate"]):
         return base
-    base_clean = base.rstrip("/")
-    if base_clean.endswith("/v1"):
-        return f"{base_clean}/chat/completions"
-    elif base_clean.count("/") <= 2:
-        return f"{base_clean}/chat/completions"
-    return base_clean
+    return f"{base.rstrip('/')}/chat/completions"
 
 def raw_llm_call(prompt: str, max_tokens: int = 800) -> str:
     url = get_llm_url()
