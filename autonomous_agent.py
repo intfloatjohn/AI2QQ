@@ -33,6 +33,12 @@ import urllib.parse
 from collections import deque
 
 try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+
+try:
     import edge_tts
     EDGE_TTS_AVAILABLE = True
 except ImportError:
@@ -839,6 +845,16 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
     max_tokens_val = int(config.get("max_tokens", 1200))
     max_tool_turns = 5
 
+    # Auto-normalize model names for known providers (e.g. DeepSeek official API)
+    model_name = config.get("model", "google/gemini-3.8-flash")
+    if "deepseek.com" in base:
+        if model_name.lower() in ["deepseek-flash", "deepseek", "deepseek-v3", "deepseekv3"]:
+            logging.info(f"Auto-normalizing DeepSeek model: '{model_name}' -> 'deepseek-chat'")
+            model_name = "deepseek-chat"
+        elif model_name.lower() in ["deepseek-r1", "deepseekr1", "r1"]:
+            logging.info(f"Auto-normalizing DeepSeek model: '{model_name}' -> 'deepseek-reasoner'")
+            model_name = "deepseek-reasoner"
+
     # ReAct tool-execution loop (up to 5 turns)
     for iteration in range(max_tool_turns):
         with batch_lock:
@@ -849,7 +865,7 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
         # On the final turn, force response synthesis without tools
         is_final_turn = (iteration == max_tool_turns - 1)
         payload = {
-            "model": config.get("model", "google/gemini-3.8-flash"),
+            "model": model_name,
             "messages": messages,
             "temperature": 0.72,
             "max_tokens": max_tokens_val
@@ -863,41 +879,53 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
                 if gen_id and gen_id != current_generation_id:
                     return ""
             try:
-                req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=35) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    break
-            except urllib.error.HTTPError as he:
-                err_body = he.read().decode("utf-8") if he.fp else str(he)
-                logging.warning(f"LLM call attempt #{attempt+1} failed ({he.code}): {err_body[:180]}")
-                if attempt == 0:
-                    time.sleep(1.2)
-                    clean_msgs = []
-                    for m in messages:
-                        if m.get("role") == "tool":
-                            label = "【Tool Search Observation】:" if lang == "en" else "【系统提示：工具搜索结果】:"
-                            clean_msgs.append({
-                                "role": "user",
-                                "content": label + "\n" + str(m.get("content", "")) + "\n" + ("Please reply naturally based on this." if lang == "en" else "请结合搜索结果自然回复。")
-                            })
-                        elif m.get("role") == "assistant" and m.get("tool_calls"):
-                            continue
-                        else:
-                            clean_msgs.append(m)
-                    payload = {
-                        "model": config.get("model", "google/gemini-3.8-flash"),
-                        "messages": clean_msgs,
-                        "temperature": 0.72,
-                        "max_tokens": max_tokens_val
-                    }
-                    continue
+                if REQUESTS_AVAILABLE:
+                    resp = requests.post(url, json=payload, headers=headers, timeout=35)
+                    if resp.status_code == 200:
+                        try:
+                            data = resp.json()
+                            break
+                        except Exception as je:
+                            logging.warning(f"LLM call attempt #{attempt+1} JSON decode error: {je}, body={resp.text[:200]}")
+                    else:
+                        logging.warning(f"LLM call attempt #{attempt+1} failed ({resp.status_code}): {resp.text[:200]}")
                 else:
-                    break
+                    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+                    with urllib.request.urlopen(req, timeout=35) as resp:
+                        raw_bytes = resp.read()
+                        if raw_bytes.startswith(b'\x1f\x8b'):
+                            import gzip
+                            raw_bytes = gzip.decompress(raw_bytes)
+                        data = json.loads(raw_bytes.decode("utf-8", errors="ignore"))
+                        break
+            except urllib.error.HTTPError as he:
+                err_body = he.read().decode("utf-8", errors="ignore") if he.fp else str(he)
+                logging.warning(f"LLM call attempt #{attempt+1} failed ({he.code}): {err_body[:200]}")
             except Exception as e:
                 logging.warning(f"LLM call attempt #{attempt+1} error: {e}")
-                if attempt == 0:
-                    time.sleep(1.2)
-                    continue
+
+            if attempt == 0:
+                time.sleep(1.2)
+                clean_msgs = []
+                for m in messages:
+                    if m.get("role") == "tool":
+                        label = "【Tool Search Observation】:" if lang == "en" else "【系统提示：工具搜索结果】:"
+                        clean_msgs.append({
+                            "role": "user",
+                            "content": label + "\n" + str(m.get("content", "")) + "\n" + ("Please reply naturally based on this." if lang == "en" else "请结合搜索结果自然回复。")
+                        })
+                    elif m.get("role") == "assistant" and m.get("tool_calls"):
+                        continue
+                    else:
+                        clean_msgs.append(m)
+                payload = {
+                    "model": model_name,
+                    "messages": clean_msgs,
+                    "temperature": 0.72,
+                    "max_tokens": max_tokens_val
+                }
+                continue
+            else:
                 break
 
         choice = data.get("choices", [{}])[0]
