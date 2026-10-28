@@ -2,6 +2,7 @@
 # ==============================================================================
 # One-Line All-in-One Launcher for QQ AI Companion Daemon
 # Preflight checks mirrors, auto-configures NapCat HTTP 3000, handles QR & boots
+# Automatically stops Docker container on exit or interrupt (Ctrl+C)
 # ==============================================================================
 set -e
 
@@ -12,7 +13,64 @@ echo "=================================================================="
 echo "      QQ AI Companion Daemon - All-in-One Launcher                "
 echo "=================================================================="
 
-# 1. Determine OneBot HTTP API endpoint from config.json
+# 1. Determine Docker command & privileges
+DOCKER_CMD="docker"
+if command -v docker >/dev/null 2>&1; then
+    if ! docker ps >/dev/null 2>&1; then
+        if sg docker -c "docker ps" >/dev/null 2>&1; then
+            DOCKER_CMD="sg docker -c docker"
+        elif sudo -n docker ps >/dev/null 2>&1; then
+            DOCKER_CMD="sudo docker"
+        elif command -v sudo >/dev/null 2>&1; then
+            DOCKER_CMD="sudo docker"
+        fi
+    fi
+fi
+
+# 2. Register Unified Exit & Signal Cleanup Handler
+LOG_PID=""
+AGENT_PID=""
+
+cleanup() {
+    # Disable traps to avoid duplicate/recursive calls
+    trap - INT TERM SIGHUP EXIT
+
+    echo ""
+    echo "=================================================================="
+    echo "      Shutting down QQ AI Companion Daemon & Services...          "
+    echo "=================================================================="
+
+    # Terminate background log follower if running
+    if [ -n "$LOG_PID" ] && kill -0 "$LOG_PID" 2>/dev/null; then
+        kill "$LOG_PID" 2>/dev/null || true
+    fi
+
+    # Terminate background agent process if running
+    if [ -n "$AGENT_PID" ] && kill -0 "$AGENT_PID" 2>/dev/null; then
+        echo "[*] Stopping AI Companion agent process..."
+        kill -TERM "$AGENT_PID" 2>/dev/null || true
+        wait "$AGENT_PID" 2>/dev/null || true
+    fi
+
+    # Cleanly shut down NapCat Docker container on exit unless explicitly requested to keep it
+    if [ "${KEEP_DOCKER:-0}" = "1" ] || [ "${AUTO_STOP_DOCKER:-true}" = "false" ]; then
+        echo "[*] Keeping NapCat Docker container running (KEEP_DOCKER=1)."
+    else
+        if command -v docker >/dev/null 2>&1; then
+            if $DOCKER_CMD ps --format '{{.Names}}' 2>/dev/null | grep -q "^napcat$"; then
+                echo "[*] Stopping NapCat Docker container..."
+                $DOCKER_CMD stop napcat >/dev/null 2>&1 || true
+                echo "[+] NapCat Docker container stopped."
+            fi
+        fi
+    fi
+
+    echo "[✓] Shutdown completed successfully."
+}
+
+trap cleanup INT TERM SIGHUP EXIT
+
+# 3. Determine OneBot HTTP API endpoint from config.json
 ONEBOT_API="http://127.0.0.1:3000"
 if [ -f "config.json" ]; then
     CFG_API=$(grep -o '"onebot_http_api"[^,]*' config.json | head -1 | cut -d'"' -f4 || true)
@@ -123,19 +181,6 @@ if check_onebot_online; then
 else
     echo "[-] OneBot 11 is not responding on ${ONEBOT_API}."
     echo "[*] Attempting to auto-start NapCat via Docker..."
-
-    # Determine docker command
-    DOCKER_CMD="docker"
-    if ! docker ps >/dev/null 2>&1; then
-        if sg docker -c "docker ps" >/dev/null 2>&1; then
-            DOCKER_CMD="sg docker -c docker"
-        elif sudo -n docker ps >/dev/null 2>&1; then
-            DOCKER_CMD="sudo docker"
-        elif command -v sudo >/dev/null 2>&1; then
-            echo "[*] Docker requires elevated permissions. Using sudo..."
-            DOCKER_CMD="sudo docker"
-        fi
-    fi
 
     if command -v docker >/dev/null 2>&1; then
         pull_napcat_image() {
@@ -294,7 +339,6 @@ else
             # Stream docker logs in background so ASCII QR code renders directly in terminal
             $DOCKER_CMD logs -f napcat &
             LOG_PID=$!
-            trap 'kill $LOG_PID 2>/dev/null || true; exit 1' INT TERM
 
             RESTARTED_FOR_HTTP=0
             # Poll until OneBot 11 login succeeds and binds port 3000
@@ -315,7 +359,7 @@ else
 
             kill $LOG_PID 2>/dev/null || true
             wait $LOG_PID 2>/dev/null || true
-            trap - INT TERM
+            LOG_PID=""
 
             echo ""
             echo "=================================================================="
@@ -343,4 +387,7 @@ fi
 echo "=================================================================="
 echo "      Starting QQ AI Companion Daemon...                          "
 echo "=================================================================="
-exec python3 autonomous_agent.py
+python3 autonomous_agent.py &
+AGENT_PID=$!
+wait $AGENT_PID 2>/dev/null || true
+AGENT_PID=""

@@ -375,7 +375,7 @@ else
                 # Stream docker logs in background so ASCII QR code renders directly in terminal
                 $DOCKER_CMD logs -f napcat &
                 LOG_PID=$!
-                trap 'kill $LOG_PID 2>/dev/null || true; exit 1' INT TERM
+                trap 'kill $LOG_PID 2>/dev/null || true; if [ "${KEEP_DOCKER:-0}" != "1" ]; then echo ""; echo "[*] Stopping NapCat Docker container..."; $DOCKER_CMD stop napcat >/dev/null 2>&1 || true; fi; exit 1' INT TERM
 
                 RESTARTED_FOR_HTTP=0
                 # Poll until OneBot 11 login succeeds and binds port 3000

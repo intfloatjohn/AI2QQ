@@ -22,11 +22,13 @@ import time
 import html
 import base64
 import signal
+import atexit
 import asyncio
 import logging
 import datetime
 import traceback
 import threading
+import subprocess
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1239,8 +1241,26 @@ def main():
     poller = threading.Thread(target=poll_messages_loop, daemon=True)
     poller.start()
 
+    def stop_docker_napcat_if_local():
+        """Cleanly stops the local NapCat Docker container on exit if it is running."""
+        try:
+            if os.getenv("KEEP_DOCKER", "0") == "1" or os.getenv("AUTO_STOP_DOCKER", "true").lower() == "false":
+                return
+            api = config.get("onebot_http_api", "http://127.0.0.1:3000")
+            if any(h in api for h in ["127.0.0.1", "localhost", "0.0.0.0"]):
+                res = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+                if "napcat" in res.stdout.split():
+                    logging.info("[*] Stopping local NapCat Docker container...")
+                    subprocess.run(["docker", "stop", "napcat"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
+                    logging.info("[+] NapCat Docker container stopped.")
+        except Exception:
+            pass
+
+    atexit.register(stop_docker_napcat_if_local)
+
     def handle_signal(signum, frame):
         logging.info("Exiting cleanly...")
+        stop_docker_napcat_if_local()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_signal)
@@ -1251,6 +1271,7 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Daemon stopped.")
+        stop_docker_napcat_if_local()
 
 if __name__ == "__main__":
     main()
