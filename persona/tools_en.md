@@ -26,12 +26,19 @@ To ensure all models (Gemini, GPT-4o, Claude, DeepSeek, Qwen, etc.) trigger tool
 
 ---
 
-## 3. Voice & Multimedia Interaction
+## 3. Voice & Picture Library Management
 
 ### 1. Voice Synthesis: `[voice: text to vocalize]` (or `[Send Voice: text]`)
 - Synthesizes speech using Edge-TTS and sends it as a genuine QQ voice bubble.
 
-### 2. QQ Faces & Stickers (Use moderately & naturally):
+### 2. Picture Library Management (Full CRUD Agency):
+- **Send**: `[PICTURE: keyword]` or `[IMAGE: keyword]`
+- **Save**: `[SAVE_STICKER: tag1, tag2: summary description]`
+- **List/Browse**: `[LIST_PICTURES]` or `[LIST_PICTURES: query]`
+- **Modify**: `[MODIFY_PICTURE: target ID or tag: new tags: new summary]`
+- **Delete**: `[DELETE_PICTURE: target ID or tag]`
+
+### 3. QQ Faces & Stickers (Use moderately & naturally):
 - Faces: `[face: hug]`, `[face: smile]`, `[face: shy]`, `[face: pat]`, `[face: heart]`, `[face: cat]`
 - Stickers: `[sticker: keyword]` (matches files in stickers/)
 - Interactions: `[poke]`, `[like]`
@@ -40,8 +47,12 @@ To ensure all models (Gemini, GPT-4o, Claude, DeepSeek, Qwen, etc.) trigger tool
 
 ## 4. Native Function Calling Tools
 When the API supports tools, the backend mounts:
-- `web_search(query: str)`
-- `search_chat_history(query: str)`
-- `read_memory()`
-- `update_memory(content: str)`
-- `send_voice(text: str)`
+- `web_search(query: str)`: Live internet search
+- `search_chat_history(query: str)`: Search full chat history
+- `read_memory()`: Read persistent memory
+- `update_memory(content: str)`: Real-time memory update
+- `search_picture_library(query: str)`: Search picture library
+- `list_pictures(filter_query: str)`: Browse or filter pictures in library
+- `modify_picture(target: str, new_tags: list, new_summary: str, replace_tags: bool)`: Modify picture tags and description
+- `delete_picture(target: str)`: Delete picture from library
+- `send_voice(text: str)`: Vocalize and send voice bubble

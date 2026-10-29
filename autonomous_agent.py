@@ -254,6 +254,69 @@ AVAILABLE_TOOLS = [
                 "required": ["query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_pictures",
+            "description": "浏览或按关键词检索个人图库/表情包库中已有的图片、标签与描述 (List pictures stored in library)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filter_query": {
+                        "type": "string",
+                        "description": "可选的筛选关键词，留空则列出最近保存的图片 / Optional filter query"
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "modify_picture",
+            "description": "修改图库中某张图片的标签(tags)或描述(summary) (Modify tags or summary of an existing picture in library)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "要修改的目标图片标识（可以是图片ID、原标签、原描述关键词或文件名）/ Target picture ID, tag or keyword"
+                    },
+                    "new_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "更新后的新标签列表，例如 ['猫咪', '开心'] / New tags"
+                    },
+                    "new_summary": {
+                        "type": "string",
+                        "description": "更新后的图片描述 / New summary description"
+                    },
+                    "replace_tags": {
+                        "type": "boolean",
+                        "description": "是否完全替换旧标签（默认为 false，即追加标签）/ Whether to replace all tags"
+                    }
+                },
+                "required": ["target"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_picture",
+            "description": "从图库中彻底删除指定的图片记录及文件 (Delete a picture from library)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "要删除的目标图片标识（图片ID、标签、描述关键词或文件名）/ Target picture ID, tag or keyword"
+                    }
+                },
+                "required": ["target"]
+            }
+        }
     }
 ]
 
@@ -871,6 +934,172 @@ def search_picture_database(query: str) -> str:
                     if any(a.lower() in base.lower() for a in alias_list):
                         return os.path.join(STICKERS_DIR, fname)
     return ""
+
+def list_picture_database(filter_query: str = "", max_items: int = 30) -> str:
+    """Returns a formatted list of pictures stored in catalog.json."""
+    init_picture_database()
+    if not os.path.exists(PICTURE_CATALOG_FILE):
+        return "【图库状态】: 当前图库为空。"
+    try:
+        with open(PICTURE_CATALOG_FILE, "r", encoding="utf-8") as f:
+            catalog = json.load(f)
+        if not catalog or not isinstance(catalog, list):
+            return "【图库状态】: 当前图库为空。"
+
+        results = []
+        q = (filter_query or "").strip().lower()
+        for item in reversed(catalog):
+            pid = item.get("id", "")
+            tags = item.get("tags", [])
+            summary = item.get("summary", "")
+            fname = item.get("filename", "")
+            if q:
+                if not (q in pid.lower() or q in fname.lower() or any(q in t.lower() for t in tags) or q in summary.lower()):
+                    continue
+            tags_str = ", ".join(tags) if tags else "无标签"
+            results.append(f"- ID: {pid} | 标签: [{tags_str}] | 描述: {summary or fname}")
+            if len(results) >= max_items:
+                break
+        if not results:
+            return f"【图库查询】: 未找到匹配 '{filter_query}' 的图片记录。"
+        return f"【图库当前存储列表 (共 {len(catalog)} 张，显示前 {len(results)} 张)】:\n" + "\n".join(results)
+    except Exception as e:
+        return f"【图库读取失败】: {e}"
+
+def update_picture_in_database(target: str, new_tags: list = None, new_summary: str = "", replace_tags: bool = False) -> str:
+    """Modifies the tags and/or description of an existing picture in the catalog."""
+    init_picture_database()
+    if not os.path.exists(PICTURE_CATALOG_FILE):
+        return "图库尚未初始化或为空。"
+    t_clean = target.strip().lower()
+    if not t_clean:
+        return "修改目标标识不能为空。"
+    try:
+        with open(PICTURE_CATALOG_FILE, "r", encoding="utf-8") as f:
+            catalog = json.load(f)
+        if not isinstance(catalog, list):
+            return "图库目录格式异常。"
+
+        matched = None
+        for item in reversed(catalog):
+            if (item.get("id", "").lower() == t_clean or 
+                item.get("filename", "").lower() == t_clean or 
+                any(t_clean == t.lower() for t in item.get("tags", [])) or
+                t_clean in item.get("summary", "").lower()):
+                matched = item
+                break
+
+        if not matched:
+            for item in reversed(catalog):
+                if any(t_clean in t.lower() for t in item.get("tags", [])):
+                    matched = item
+                    break
+
+        if matched:
+            if new_tags is not None:
+                if isinstance(new_tags, str):
+                    parsed_tags = [t.strip() for t in re.split(r'[,，\s]+', new_tags) if t.strip()]
+                elif isinstance(new_tags, list):
+                    parsed_tags = [str(t).strip() for t in new_tags if str(t).strip()]
+                else:
+                    parsed_tags = []
+                if replace_tags:
+                    matched["tags"] = parsed_tags
+                else:
+                    matched["tags"] = list(dict.fromkeys(matched.get("tags", []) + parsed_tags))
+            if new_summary:
+                matched["summary"] = str(new_summary).strip()
+            matched["timestamp"] = int(time.time())
+
+            with open(PICTURE_CATALOG_FILE, "w", encoding="utf-8") as f:
+                json.dump(catalog, f, indent=2, ensure_ascii=False)
+            logging.info(f"Successfully modified picture in database: {matched.get('id')} -> tags={matched.get('tags')}, summary='{matched.get('summary')}'")
+            return f"已成功更新图片 [{matched.get('id')}]：标签为 {matched.get('tags')}，描述为 '{matched.get('summary')}'。"
+        else:
+            logging.warning(f"Picture update target '{target}' not found in catalog.")
+            return f"未在图库中找到与 '{target}' 匹配的图片。"
+    except Exception as e:
+        logging.error(f"Failed to update picture in database: {e}")
+        return f"修改图片信息失败: {e}"
+
+def delete_picture_from_database(target: str) -> str:
+    """Deletes a picture and its image file from picture_db."""
+    init_picture_database()
+    if not os.path.exists(PICTURE_CATALOG_FILE):
+        return "图库尚未初始化或为空。"
+    t_clean = target.strip().lower()
+    if not t_clean:
+        return "删除目标标识不能为空。"
+    try:
+        with open(PICTURE_CATALOG_FILE, "r", encoding="utf-8") as f:
+            catalog = json.load(f)
+        if not isinstance(catalog, list):
+            return "图库目录格式异常。"
+
+        matched_idx = -1
+        for idx in range(len(catalog) - 1, -1, -1):
+            item = catalog[idx]
+            if (item.get("id", "").lower() == t_clean or 
+                item.get("filename", "").lower() == t_clean or 
+                any(t_clean == t.lower() for t in item.get("tags", [])) or
+                t_clean in item.get("summary", "").lower()):
+                matched_idx = idx
+                break
+
+        if matched_idx == -1:
+            for idx in range(len(catalog) - 1, -1, -1):
+                item = catalog[idx]
+                if any(t_clean in t.lower() for t in item.get("tags", [])):
+                    matched_idx = idx
+                    break
+
+        if matched_idx >= 0:
+            removed_item = catalog.pop(matched_idx)
+            rel_p = removed_item.get("path", "")
+            if rel_p:
+                abs_p = os.path.join(BASE_DIR, rel_p)
+                if os.path.exists(abs_p) and PICTURE_IMAGES_DIR in os.path.abspath(abs_p):
+                    try: os.remove(abs_p)
+                    except Exception: pass
+
+            with open(PICTURE_CATALOG_FILE, "w", encoding="utf-8") as f:
+                json.dump(catalog, f, indent=2, ensure_ascii=False)
+            logging.info(f"Deleted picture from database: {removed_item.get('id')} ({removed_item.get('filename')})")
+            return f"已成功从图库中删除图片 [{removed_item.get('id')}]（原标签: {removed_item.get('tags')}）。"
+        else:
+            logging.warning(f"Picture deletion target '{target}' not found in catalog.")
+            return f"未在图库中找到与 '{target}' 匹配的图片。"
+    except Exception as e:
+        logging.error(f"Failed to delete picture from database: {e}")
+        return f"删除图片失败: {e}"
+
+def get_picture_database_summary(max_items: int = 15) -> str:
+    """Returns a concise summary of the pictures currently indexed in catalog.json."""
+    if not os.path.exists(PICTURE_CATALOG_FILE):
+        return ""
+    try:
+        with open(PICTURE_CATALOG_FILE, "r", encoding="utf-8") as f:
+            catalog = json.load(f)
+        if not catalog or not isinstance(catalog, list):
+            return ""
+        total_count = len(catalog)
+        items = []
+        for item in catalog[-max_items:]:
+            tags = ", ".join(item.get("tags", [])) or "无标签"
+            summary = item.get("summary", "") or item.get("filename", "")
+            items.append(f"- ID: {item.get('id', '')} | 标签: [{tags}] | 描述: {summary}")
+        header = f"当前图库已收录 {total_count} 个表情/图片（显示最近 {len(items)} 个）："
+        instructions = (
+            "图库管理权限（你拥有完全的增删改查自主管理权）：\n"
+            "- 发送图片: [发图: 关键词] 或 [PICTURE: 关键词]\n"
+            "- 存新表情: [收藏表情: 标签: 描述]\n"
+            "- 修改已有图片: [修改图片: 目标原标签或ID: 新标签: 新描述] 或调用 modify_picture 工具\n"
+            "- 删除已有图片: [删除图片: 目标原标签或ID] 或调用 delete_picture 工具\n"
+            "- 查阅图库: [查看图库] 或调用 list_pictures 工具"
+        )
+        return header + "\n" + "\n".join(items) + "\n" + instructions
+    except Exception:
+        return ""
 
 # ==============================================================================
 # Feature 1: Forwarded / Combined Chat History Resolution
@@ -1749,12 +1978,40 @@ def execute_action_tags(reply_text: str):
         else:
             logging.warning(f"Agent requested to save sticker ({tags}), but no image was found in recent conversation context.")
 
+    # 9. Agent-managed Picture DB Modification & Deletion
+    # [修改图片: 目标: 新标签: 新描述] / [修改表情: 目标: 新标签: 新描述] / [更新图片: 目标: 新标签: 新描述]
+    modify_matches = re.findall(r'\[(?:修改图片|修改表情|更新图片|更新表情|MODIFY_PICTURE|modify_picture):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
+    for m_info in modify_matches:
+        m_info = m_info.strip()
+        parts = re.split(r'[:：]', m_info)
+        if len(parts) >= 1:
+            target = parts[0].strip()
+            new_tags = []
+            new_summary = ""
+            if len(parts) >= 2:
+                new_tags = [t.strip() for t in re.split(r'[,，\s]+', parts[1]) if t.strip()]
+            if len(parts) >= 3:
+                new_summary = parts[2].strip()
+            res = update_picture_in_database(target, new_tags=new_tags, new_summary=new_summary, replace_tags=False)
+            logging.info(f"Inline modify picture: {res}")
+
+    # [删除图片: 目标] / [删除表情: 目标] / [DELETE_PICTURE: target]
+    del_matches = re.findall(r'\[(?:删除图片|删除表情|移除图片|移除表情|DELETE_PICTURE|delete_picture):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
+    for d_target in del_matches:
+        d_target = d_target.strip()
+        if d_target:
+            res = delete_picture_from_database(d_target)
+            logging.info(f"Inline delete picture: {res}")
+
 def clean_tags(reply_text: str) -> str:
     text = re.sub(r'\[(?:发贴图|Send Sticker|Sticker|sticker):[^\]]+\]', '', reply_text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:发表情|Send Face|Face|face|Emoji|emoji):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:发语音|Send Voice|Voice|voice):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:PICTURE|picture|IMAGE|image|发图|发照片):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:收藏表情|保存表情|添加表情|收藏图片|保存图片|SAVE_STICKER|save_sticker):[^\]]+\]', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[(?:查看图库|查看表情包|浏览图库|LIST_PICTURES|list_pictures)(?::[^\]]+)?\]', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[(?:修改图片|修改表情|更新图片|更新表情|MODIFY_PICTURE|modify_picture):[^\]]+\]', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[(?:删除图片|删除表情|移除图片|移除表情|DELETE_PICTURE|delete_picture):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:互动|Interact|interact):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:poke|Poke|like|Like)\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:更新记忆|Update Memory|update_memory|remember|Remember):[^\]]+\]', '', text, flags=re.IGNORECASE)
@@ -1789,6 +2046,18 @@ def execute_tool_call(tool_name: str, arguments: dict, gen_id: int = 0) -> str:
                 return f"找到匹配图片: {os.path.basename(img_p)}。若需发送给对方，可在回复中加入 [PICTURE: {q}]。"
             else:
                 return f"图片库中未找到与 '{q}' 相关的图片。"
+        elif tool_name == "list_pictures":
+            fq = arguments.get("filter_query", "")
+            return list_picture_database(filter_query=fq)
+        elif tool_name == "modify_picture":
+            target = arguments.get("target", "")
+            new_tags = arguments.get("new_tags", None)
+            new_summary = arguments.get("new_summary", "")
+            replace_tags = arguments.get("replace_tags", False)
+            return update_picture_in_database(target, new_tags=new_tags, new_summary=new_summary, replace_tags=replace_tags)
+        elif tool_name == "delete_picture":
+            target = arguments.get("target", "")
+            return delete_picture_from_database(target)
         else:
             return f"Unknown tool: {tool_name}"
     except Exception as e:
@@ -1818,6 +2087,11 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
     if long_term_memory:
         mem_header = "【Long-term Memory Archive (Use [read_memory] or [remember: text])】:" if lang == "en" else "【长期记忆概览（可使用 [查看记忆] 获取完整版，使用 [更新记忆: 内容] 实时补充）】:"
         system_prompt += f"\n\n{mem_header}\n{long_term_memory}"
+
+    pic_summary = get_picture_database_summary()
+    if pic_summary:
+        pic_header = "【Sticker & Picture Library Catalog】:" if lang == "en" else "【个人图库与表情包存储库概览】:"
+        system_prompt += f"\n\n{pic_header}\n{pic_summary}"
 
     url = get_llm_url()
 
@@ -1939,6 +2213,7 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
         inline_chat_search = re.search(r'\[(?:搜索聊天记录|Search History|search_history|history):\s*([^\]]+)\]', raw_reply, re.IGNORECASE)
         inline_read_mem = bool(re.search(r'\[(?:查看记忆|Read Memory|read_memory|Memory|memory)\]', raw_reply, re.IGNORECASE))
         inline_update_mem = re.findall(r'\[(?:更新记忆|Update Memory|update_memory|Remember|remember):\s*([^\]]+)\]', raw_reply, re.IGNORECASE)
+        inline_list_pics = re.search(r'\[(?:查看图库|查看表情包|浏览图库|LIST_PICTURES|list_pictures)(?::\s*([^\]]+))?\]', raw_reply, re.IGNORECASE)
 
         for mem_content in inline_update_mem:
             update_memory_realtime(mem_content)
@@ -1970,7 +2245,7 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
             continue
 
         # 2. Inline Command Tag Handling
-        if (inline_search or inline_chat_search or inline_read_mem) and not is_final_turn:
+        if (inline_search or inline_chat_search or inline_read_mem or inline_list_pics) and not is_final_turn:
             obs_lines = []
             if inline_search:
                 q = inline_search.group(1).strip()
@@ -1983,6 +2258,10 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
             if inline_read_mem:
                 logging.info("Executing Inline Command: [Read Memory]")
                 obs_lines.append(f"【Memory Archive Content】:\n{read_memory_file()}")
+            if inline_list_pics:
+                filter_q = (inline_list_pics.group(1) or "").strip()
+                logging.info(f"Executing Inline Command: [List Pictures: {filter_q}]")
+                obs_lines.append(list_picture_database(filter_q))
 
             messages.append({"role": "assistant", "content": raw_reply})
             hint_str = "【System: Tool Observations】\n" + "\n\n".join(obs_lines) + "\nPlease reply naturally to the user based on these retrieved observations."
