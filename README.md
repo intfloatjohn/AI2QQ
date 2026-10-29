@@ -37,6 +37,8 @@
   * Persona, tone, and action guidelines are stored in `persona/*.md`. Hot-reloads on every message with human-like conversation style (no repetitive emoji suffixes, flexible lengths).
 * **🏷️ Rich Action Tags**:
   * Supports inline tags for QQ Yellow Faces (`[Send Face: Hug]`), custom stickers (`[Send Sticker: Heart]`), voice notes (`[Send Voice: ...]`), and interactions (`[Interact: Poke]`).
+* **👥 Group Chat with Physically Separated Memory**:
+  * Joins whitelisted QQ groups as the same character. Replies only when its name is mentioned, it is @'d, or someone quotes it. Identity is checked by QQ ID, never by nickname. Every group has its own history and memory, and the Master's private memory is never loaded in a group, even when the Master is the one asking. Non-master members have a configurable message limit. See [USAGE_EN.md §15](USAGE_EN.md#15-group-chat).
 * **🌐 Cross-Platform & Headless Server Ready**:
   * Runs on Windows, Debian, Ubuntu, CentOS, or Docker with terminal ASCII QR code login.
 

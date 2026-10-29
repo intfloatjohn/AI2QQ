@@ -22,6 +22,10 @@ temp_reply.mp3
 temp_mcp_reply.mp3
 *.mp3
 downloads/
+# Per-chat session data (group histories, memories, member counters) and safety backups
+sessions/
+*.corrupt-*
+*.tmp-*
 picture_db/images/*
 !picture_db/images/.gitkeep
 

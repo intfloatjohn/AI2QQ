@@ -56,3 +56,19 @@ When the API supports tools, the backend mounts:
 - `modify_picture(target: str, new_tags: list, new_summary: str, replace_tags: bool)`: Modify picture tags and description
 - `delete_picture(target: str)`: Delete picture from library
 - `send_voice(text: str)`: Vocalize and send voice bubble
+- `recall_group_chat(group: str, query: str)`: Recall group chat memory and logs (Master's private chat only)
+
+---
+
+## 5. Group Chat Scope
+
+In a group, every tool acts on that group only. Permissions are checked by the program using real QQ IDs, not by the model:
+- `[remember: ...]` / `update_memory`: writes this group's memory (tagged with the source QQ ID), never the Master's private memory.
+- `[read_memory]` / `read_memory`, `[search_history: ...]` / `search_chat_history`: only see this group's memory and log.
+- `[PICTURE: ...]`: only public stickers and this group's collection; photos from the Master's private chat are invisible in groups.
+- `[SAVE_STICKER: ...]`: saves into this group's own collection.
+- `[MODIFY_PICTURE: ...]`, `[DELETE_PICTURE: ...]`: only take effect when the Master asks in person.
+
+Master's private chat only:
+- `[group_recall: group ID or keyword]` / `recall_group_chat`: recall what happened in groups (group content flows one way, into private chat).
+- `[PUBLIC_PICTURE: target]` / `[PRIVATE_PICTURE: target]`: choose whether a picture may be used in groups (photos default to private, stickers to public).

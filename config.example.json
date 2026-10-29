@@ -30,5 +30,18 @@
   "enable_picture_database": true,
   "enable_multi_bubble_reply": true,
   "multi_bubble_delay_sec": 1.2,
-  "enable_autonomous_refusal": true
+  "enable_autonomous_refusal": true,
+  "enable_group_chat": false,
+  "group_whitelist": [],
+  "bot_name": "",
+  "group_trigger_keywords": [],
+  "group_trigger_on_at": true,
+  "group_trigger_on_reply": true,
+  "group_member_msg_limit": 10,
+  "group_member_limit_window_sec": 86400,
+  "group_member_limit_notice": "",
+  "group_reply_with_at": true,
+  "group_reply_with_quote": false,
+  "group_context_messages": 12,
+  "group_max_bubbles": 3
 }

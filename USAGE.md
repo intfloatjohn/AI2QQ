@@ -21,6 +21,7 @@
 12. [配置文件与核心参数说明 (`config.json`)](#12-配置文件与核心参数说明-configjson)
 13. [Debian / Linux 无头部署与终端扫码](#13-debian--linux-无头部署与终端扫码)
 14. [Windows 一键部署与双击运行](#14-windows-一键部署与双击运行)
+15. [群聊模式 (Group Chat)](#15-群聊模式-group-chat)
 
 ---
 
@@ -252,6 +253,7 @@ python3 mcp-server/onebot_mcp.py
 * `enable_picture_database`: 是否启用自主图库与表情包存储检索系统。
 * `poll_interval_sec`: 消息轮询间隔（推荐 0.6 ~ 1.0 秒）。
 * `compact_threshold` / `compact_keep_recent`: 对话长期记忆压缩阈值与保留轮数。
+* 群聊相关参数（`enable_group_chat`、`group_whitelist` 等）见 [第 15 节](#15-群聊模式-group-chat)。
 
 ---
 
@@ -295,3 +297,105 @@ chmod +x setup.sh start.sh
    * 提示安装 NapCat 时，输入 `1` 即可全自动下载并解压官方最新版 NapCatQQ 到 `NapCat/` 文件夹。
 2. **日常启动**：
    * 在 `config.json` 中配置好 API Key 和 QQ 号后，双击 **`start.bat`**（或 `start_agent.bat`）即可一键启动 AI 伴侣。
+
+---
+
+## 15. 群聊模式 (Group Chat)
+
+让 AI 伴侣以同一个人设加入 QQ 群聊天，同时保证主人的私人记忆绝不会出现在群里。群里的它和私聊里的它是同一个"人"：记得群里发生的事，私聊时主人问起也能回忆；但私聊内容永远不会被带进群里。
+
+### 15.1 开启方法
+在 `config.json` 中加入以下字段（群聊需要两个不同的 QQ 号，即 `bot_qq` ≠ `master_qq`）：
+```json
+{
+  "enable_group_chat": true,
+  "group_whitelist": [123456789],
+  "bot_name": "星喵",
+  "group_trigger_keywords": ["星喵", "Hoshineko"],
+  "group_member_msg_limit": 10,
+  "group_member_limit_window_sec": 86400
+}
+```
+保存后无需重启，约 10 秒内自动生效。**只有 `group_whitelist` 里的群会被读取和回复**；白名单为空时不会读取任何群。
+
+### 15.2 什么时候回复
+一条群消息只有满足以下任一条件，才会交给模型处理：
+- **提到角色名**：消息文字里含有 `group_trigger_keywords` 中的词（留空时使用 `bot_name`，再留空则使用机器人的 QQ 昵称）。英文名按整词匹配，例如 `neko` 不会被 `nekomimi` 误触发。
+- **@机器人**（`group_trigger_on_at`，默认开启）。
+- **回复/引用了机器人发过的消息**（`group_trigger_on_reply`，默认开启）。
+
+其余群消息不会触发回复，只作为"背景消息"在下一次被叫到时提供给模型理解上下文。被叫到后，如果模型觉得只是被顺口提到、不需要说话，也可以输出 `[NO_REPLY]` 保持沉默。
+
+其他细节：
+- 群友先发图片、再叫机器人问"这是什么"时，会自动带上该群友刚才发的图片；引用一条带图的消息提问也一样。
+- 模型正在回复时，新来的群消息会排队，等这条回复发完再处理（私聊则保持原来的"打断并合并"机制）。
+- 群里的回复更简短，最多拆成 `group_max_bubbles` 条气泡；默认会在第一条气泡里 @ 提问的人。
+
+### 15.3 身份识别：只认 QQ 号，不认昵称
+- 主人身份**只**通过 OneBot 上报的真实 `user_id` 与 `master_qq` 比对来判断；群名片、昵称完全不参与身份判断。
+- 发给模型的每条群消息前都有程序生成的发言人标签：主人是 `【主人✔】`，其他人是 `【群友 QQ:号码 昵称:xxx】`。群友输入的文字和昵称里的 `【】` 会被替换成 `[]`，所以任何人都伪造不了 `【主人✔】` 标签。
+- 所有权限检查都在代码里按 QQ 号执行，不依赖模型"听话"。即使模型被提示词注入完全骗过，它在群里也拿不到私聊数据，也做不了越权操作。
+
+### 15.4 记忆与资产隔离（物理隔离）
+| 内容 | 主人私聊 | 每个群 |
+| :--- | :--- | :--- |
+| 短期上下文 | `history.json`（原文件，记忆无缝延续） | `sessions/group_<群号>/history.json` |
+| 长期记忆 | `memory_summary.txt` | `sessions/group_<群号>/memory_summary.txt` |
+| 永久聊天记录 | `chat_history.jsonl` | `sessions/group_<群号>/chat_history.jsonl` |
+| 群友发言次数 | — | `sessions/group_<群号>/quota.json` |
+| 已处理消息记录 | — | `sessions/group_<群号>/seen_ids.json`（重启不会重复回复） |
+| 临时下载 | `downloads/` | `downloads/group_<群号>/` |
+
+- 群聊会话的任何代码路径都不会打开主人的私聊文件。`[查看记忆]`、`[搜索聊天记录]`、`[更新记忆]` 在群里都只作用于本群；`agent.log`（混有所有聊天）在群里也不会被搜索。
+- **即使是主人本人在群里说话，群里的模型也拿不到私人记忆**：群里的回复是公开的，而且同一批消息里可能混有别人的注入内容。私密的事请在私聊里问。
+- 不同群之间互相隔离，A 群的记忆在 B 群里不可见。
+- **记忆单向流动**：主人在私聊里问"群里今天聊了什么"，伴侣可以用 `[查看群聊: 群号或关键词]` 或 `recall_group_chat` 工具回忆群聊内容。
+- 群聊记忆里的每一条都会自动带上来源，例如 `(来源: QQ:123(小明))`，由程序根据真实 QQ 号写入。每个群的记忆有长度上限（`group_memory_max_chars`），也会像私聊一样自动压缩。
+
+### 15.5 图库：表情包共享，照片私密
+图库仍然是一个统一的 `picture_db/`，但每张图片都有可见范围：
+- **表情包/动图**（包括 `stickers/` 里的预置贴图）：公开，所有聊天都能用。
+- **主人私聊里收到的普通照片**：私密，只在私聊里可用，群里搜不到也发不出。
+- **在群里收藏的图片**：只属于该群（主人私聊里也能看到）。
+- 旧版图库里没有可见范围的图片：带"表情包/动图"标签或位于 `stickers/` 的算公开，其余按私密处理。
+- 群里不会自动收藏群友发的图片；在群里修改、删除图片只有主人本人（按 QQ 号判断）提出时才会执行，而且只能动该群可见的图片。
+- 主人可以在私聊里用 `[公开图片: ID或标签]` / `[私密图片: ID或标签]` 调整某张图片的可见范围。
+
+### 15.6 群友发言次数限制
+- 每位群友（主人除外）在一个时间窗口内最多触发 `group_member_msg_limit` 次回复（默认 24 小时滚动窗口内 10 次）。只统计叫到机器人的消息；普通聊天不计数。
+- 超过上限后，该群友的消息会被**完全忽略**（连背景消息也不再采用），直到窗口内的次数回落。
+- `group_member_limit_window_sec` 设为 `0` 表示永久上限、永不重置；`group_member_msg_limit` 设为 `0` 表示不限制。
+- 计数保存在 `quota.json`，重启不会清零。想手动解除限制，删除该群目录下的 `quota.json` 即可。
+- 可选 `group_member_limit_notice`：群友第一次超限时发一条提示语（默认留空，静默忽略）。
+
+### 15.7 群聊参数一览
+| 参数 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `enable_group_chat` | `false` | 群聊总开关 |
+| `group_whitelist` | `[]` | 允许的群号列表；为空时不读取任何群 |
+| `bot_name` | `""` | 角色名，也是默认触发词 |
+| `group_trigger_keywords` | `[]` | 触发词列表；为空时使用 `bot_name` 或机器人 QQ 昵称 |
+| `group_trigger_on_at` | `true` | 被 @ 时回复 |
+| `group_trigger_on_reply` | `true` | 被引用（回复机器人的消息）时回复 |
+| `group_member_msg_limit` | `10` | 每位群友的回复次数上限（主人不受限；`0` = 不限） |
+| `group_member_limit_window_sec` | `86400` | 计数窗口（秒，滚动）；`0` = 永不重置 |
+| `group_member_limit_notice` | `""` | 首次超限时的提示语（留空则静默） |
+| `group_reply_with_at` | `true` | 回复时 @ 提问的人 |
+| `group_reply_with_quote` | `false` | 回复时引用对方的消息 |
+| `group_context_messages` | `12` | 作为背景提供给模型的最近群消息条数 |
+| `group_context_max_age_sec` | `900` | 背景消息的最长时效（秒） |
+| `group_max_tokens` | `800` | 群聊回复的最大 token 数 |
+| `group_max_bubbles` | `3` | 群聊回复最多拆成几条气泡 |
+| `group_memory_max_chars` | `3000` | 每个群长期记忆的长度上限（超出时丢弃最旧条目） |
+| `group_log_ambient` | `true` | 未触发的群消息是否也存入该群的聊天记录（供回忆） |
+| `group_max_file_bytes` | `8388608` | 群文件解析的大小上限（字节） |
+| `group_poll_interval_sec` | `1.5` | 群消息轮询间隔（秒） |
+| `group_debounce_delay_sec` / `group_max_batch_wait_sec` | `1.5` / `6.0` | 群消息合并窗口与最长等待（秒） |
+
+### 15.8 自定义群聊风格
+`persona/system_prompt_group_zh.md`（英文模式为 `system_prompt_group_en.md`）控制群聊里的说话风格：更简短、不刷屏、不把群友叫"主人"等，可以自由修改。身份识别、隐私隔离等安全规则写在程序里，修改或删除这个文件不会削弱它们。
+
+### 15.9 注意事项
+- 单账号模式（`bot_qq == master_qq`）下群聊不会启动：主人和机器人共用一个 QQ 号，程序无法按 QQ 号区分两者，日志里会有提示。
+- 如果 `config.json` 里的 `bot_qq` 填错，群聊会以 NapCat 实际登录的账号为准，并在日志中给出警告。
+- 机器人必须已经是白名单群的成员；读取失败时日志每 5 分钟提示一次。
