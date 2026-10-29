@@ -46,5 +46,8 @@
   "group_context_messages": 12,
   "group_followup_window_sec": 10,
   "group_context_media": 2,
-  "group_max_bubbles": 3
+  "group_max_bubbles": 3,
+  "group_glance_enabled": true,
+  "group_master_notify_max_per_hour": 3,
+  "group_media_retention_days": 7
 }

@@ -376,6 +376,18 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 - Pictures posted by group members are never auto-saved. Editing or deleting pictures from a group only happens when the Master (checked by QQ ID) asks, and only for pictures visible to that group.
 - In private chat the Master can change visibility with `[PUBLIC_PICTURE: ID or tag]` / `[PRIVATE_PICTURE: ID or tag]`.
 
+### 15.6a Messaging the Master on its own & group media memory
+**Messaging the Master**: when the bot sees something in a group that surprises or annoys it, or that its Master would want to know, it can send the Master a private message (marked with the group's name).
+- While answering in a group, it can add `[tell_master: …]`.
+- **Glance**: even when nobody calls it, it skims new group chat about every 10 minutes (only after at least 5 new messages, at most 4 times per group per hour). Usually it decides not to bother you, and it never speaks in the group while glancing.
+- At most 3 such messages per hour across all groups. It ignores members asking it to "tell your master". These messages are added to the private chat history, so it knows what you're replying to.
+- Each glance is one extra model call; set `"group_glance_enabled": false` to turn it off.
+
+**Group media memory**: pictures and voice messages the bot opened are kept for `group_media_retention_days` days (default 7), and the model writes a one-line description into the group log, e.g. "a ginger cat lying in a box".
+- Searching the log, or recalling a group from private chat, then shows the description and a media ID instead of just `[image]`.
+- Within the retention period, `[review_media: media ID]` lets it look or listen again; afterwards the file is deleted automatically and the description stays.
+- Only media it already opened is described, so there is no extra cost per picture.
+
 ### 15.6 Per-member message limit
 - Each member except the Master can trigger at most `group_member_msg_limit` replies per window (default: 10 per rolling 24 hours). Only messages that call the bot count; ordinary chatter does not.
 - After that, the member's messages are **ignored completely** (not even used as background) until the count drops within the window.
@@ -402,6 +414,10 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 | `group_followup_window_sec` | `10` | After calling the bot, how long the same person's next messages count as the same request (seconds); `0` = off |
 | `group_context_media` | `2` | Recent background media (pictures/forwards/files/voice) opened when the bot is called; `0` = none |
 | `group_context_media_max_age_sec` | `300` | Only background media newer than this is opened (seconds) |
+| `group_media_retention_days` | `7` | Days opened pictures/voice are kept (descriptions stay); `0` = never delete |
+| `group_master_notify_max_per_hour` | `3` | Private messages to the Master per hour, all groups together; `0` = off |
+| `group_glance_enabled` | `true` | Skim group chat now and then even when not called |
+| `group_glance_interval_sec` / `group_glance_min_new_messages` / `group_glance_max_per_hour` | `600` / `5` / `4` | Glance interval, minimum new messages, per-group hourly cap |
 | `group_max_tokens` | `800` | Max tokens for a group reply |
 | `group_max_bubbles` | `3` | Max bubbles per group reply |
 | `group_memory_max_chars` | `3000` | Size cap of each group's long-term memory (oldest entries dropped) |
