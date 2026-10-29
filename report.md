@@ -184,7 +184,7 @@ flowchart TD
   "api_key": "sk-your-key-here",
   "model": "deepseek-flash",
   "master_qq": 123456789,
-  "bot_qq": 123456789,
+  "bot_qq": 987654321,
   "onebot_http_api": "http://127.0.0.1:3000",
   "language": "zh",
   "poll_interval_sec": 0.8,
