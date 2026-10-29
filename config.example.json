@@ -6,6 +6,7 @@
   "master_qq": 123456789,
   "bot_qq": 987654321,
   "onebot_http_api": "http://127.0.0.1:3000",
+  "onebot_access_token": "",
   "language": "zh",
   "poll_interval_sec": 0.8,
   "debounce_delay_sec": 2.2,
@@ -43,5 +44,7 @@
   "group_reply_with_at": true,
   "group_reply_with_quote": false,
   "group_context_messages": 12,
+  "group_followup_window_sec": 10,
+  "group_context_media": 2,
   "group_max_bubbles": 3
 }

@@ -87,6 +87,7 @@ config = {
     "master_qq": 123456789,
     "bot_qq": 987654321,
     "onebot_http_api": "http://127.0.0.1:3000",
+    "onebot_access_token": "",                # Must match the token of NapCat's HTTP server, if one is set
     "language": "zh",
     "poll_interval_sec": 1.2,
     "debounce_delay_sec": 1.8,
@@ -127,6 +128,9 @@ config = {
     "group_max_batch_wait_sec": 6.0,
     "group_context_messages": 12,             # Recent non-trigger messages shown as background
     "group_context_max_age_sec": 900,
+    "group_followup_window_sec": 10,          # A member's messages right after calling the bot join that request
+    "group_context_media": 2,                 # Recent background messages whose pictures/files/forwards get opened
+    "group_context_media_max_age_sec": 300,
     "group_reply_with_at": True,
     "group_reply_with_quote": False,
     "group_max_tokens": 800,
@@ -307,7 +311,7 @@ class ChatSession:
         self.debounce_timer = None
         self.generation_id = 0
         self.first_message_time = 0.0
-        self.busy = False
+        self.active_worker_gen = 0          # generation id of the worker currently writing a reply
         # Private chat: a new message interrupts and merges with the in-flight reply.
         # Group chat: finish the current reply first, then handle what arrived meanwhile.
         self.interruptible = not self.is_group
@@ -325,6 +329,7 @@ class ChatSession:
         self.group_name_fetched_at = 0.0
         self.ambient = deque(maxlen=80)
         self.member_names = {}
+        self.followup_until = {}            # uid -> time until which their messages continue their request
         self.last_reply_time = 0.0
         self.seeded = False
         self.quota = None
@@ -824,6 +829,8 @@ def read_memory_file(session: ChatSession) -> str:
     return empty_msg
 
 def _chat_log_role_label(session: ChatSession, entry: dict, lang: str) -> str:
+    if entry.get("role") == "note":
+        return L("【系统记录】", "【System note】")
     is_user = entry.get("role") == "user"
     if session.is_group:
         if not is_user:
@@ -1165,10 +1172,14 @@ def raw_llm_call(prompt: str, max_tokens: int = 800) -> str:
 
 def call_onebot_api(endpoint: str, payload: dict, quiet: bool = False) -> dict:
     url = f"{config['onebot_http_api']}/{endpoint}"
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    access_token = str(config.get("onebot_access_token") or "").strip()
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json; charset=utf-8"},
+        headers=headers,
         method="POST"
     )
     try:
@@ -1426,10 +1437,15 @@ def search_picture_database(query: str, session: ChatSession) -> str:
     if not q:
         return ""
 
-    # 1. Search in picture_db catalog (only entries this chat may see)
+    # 1. Search in picture_db catalog (only entries this chat may see); an exact ID wins
     init_picture_database()
     with picture_db_lock:
         catalog = _load_catalog()
+    for item in reversed(catalog):
+        if picture_visible_to(item, session) and str(item.get("id", "")).lower() == q:
+            abs_p = os.path.join(BASE_DIR, item.get("path", ""))
+            if os.path.exists(abs_p):
+                return abs_p
     for item in reversed(catalog):
         if not picture_visible_to(item, session):
             continue
@@ -3219,16 +3235,22 @@ def _schedule_debounce(session: ChatSession, gen_id: int, delay: float):
     session.debounce_timer.daemon = True
     session.debounce_timer.start()
 
-def enqueue_session_message(session: ChatSession, item: dict):
-    """Adds one parsed message to a session's debounce queue."""
+def enqueue_session_message(session: ChatSession, item: dict, allow_interrupt: bool = False):
+    """Adds one parsed message to a session's debounce queue.
+    Group chat finishes a reply in progress before handling new messages, except when the same
+    person keeps talking (consecutive messages): then the reply restarts with the new message
+    merged in, the same way private chat always works."""
     with session.lock:
         if not session.pending:
             session.first_message_time = time.time()
         session.pending.append(item)
 
-        if not session.interruptible and session.busy:
-            logging.info(f"[{session.key}] Reply in progress; new message queued for the next turn.")
-            return
+        if not session.interruptible and session.active_worker_gen:
+            sender_in_flight = allow_interrupt and any(x.get("uid") == item.get("uid") for x in session.in_flight)
+            if not sender_in_flight:
+                logging.info(f"[{session.key}] Reply in progress; new message queued for the next turn.")
+                return
+            logging.info(f"[{session.key}] {item.get('uid')} kept talking; restarting the reply with the new message merged in.")
 
         session.generation_id += 1
         gen_id = session.generation_id
@@ -3269,7 +3291,7 @@ def trigger_generation(session: ChatSession, gen_id: int):
         session.in_flight = list(batch_to_process)
         session.pending.clear()
         session.first_message_time = 0.0
-        session.busy = True
+        session.active_worker_gen = gen_id
 
     threading.Thread(target=_worker_generation_thread, args=[session, batch_to_process, gen_id], daemon=True).start()
 
@@ -3284,6 +3306,8 @@ def _trigger_note(reasons) -> str:
         return L("(回复了你)", "(replied to you)")
     if "keyword" in reasons:
         return L("(提到了你)", "(mentioned you)")
+    if "followup" in reasons:
+        return L("(接着说)", "(continued)")
     return ""
 
 def collect_group_background(session: ChatSession, exclude_mids: set) -> list:
@@ -3302,39 +3326,129 @@ def collect_group_background(session: ChatSession, exclude_mids: set) -> list:
              and str(a.get("mid")) not in exclude_mids]
     return items[-max_n:]
 
+MAX_GROUP_ATTACHMENTS = 4
+
+def _attachment_ref(nums: list) -> str:
+    if not nums:
+        return ""
+    return L("（附图" + "、".join(f"#{n}" for n in nums) + "）", " (image " + ", ".join(f"#{n}" for n in nums) + ")")
+
+def _describe_attachment(n: int, att: dict) -> str:
+    who = group_speaker_label(att["uid"], att.get("name", ""))
+    kind = L("表情包", "sticker") if att.get("is_sticker") else L("图片", "picture")
+    src = att.get("source")
+    if src == "background":
+        where = L(f"{who}在群聊背景里发的{kind}", f"{kind} posted by {who} in the background chat")
+    elif src == "quote":
+        where = L(f"被引用的{who}消息里的{kind}", f"{kind} in the quoted message from {who}")
+    elif src == "followup":
+        where = L(f"{who}接着发的{kind}", f"{kind} {who} sent right after")
+    else:
+        where = L(f"{who}发给你的{kind}", f"{kind} {who} sent you")
+    line = L(f"第{n}张：{where}", f"Image {n}: {where}")
+    if att.get("pic_id"):
+        line += L(f"（已存入图库，ID: {att['pic_id']}，可以用 [发图: {att['pic_id']}] 再发一次）",
+                  f" (saved in the library as {att['pic_id']}; resend with [PICTURE: {att['pic_id']}])")
+    return line
+
 def build_group_turn(session: ChatSession, batch: list) -> tuple:
-    """Formats a group batch with code-generated speaker labels. Returns
-    (prompt_for_llm, history_text, images, audios, ctx); ctx carries the facts that permission
-    checks rely on, all computed from real QQ IDs rather than anything the model says."""
+    """Formats a group batch with code-generated speaker labels and opens the media the bot should
+    look at: pictures/files in the messages to it, plus the most recent ones in the background chat.
+    Returns (prompt_for_llm, history_text, images, audios, ctx); ctx carries the facts that
+    permission checks rely on, all computed from real QQ IDs rather than anything the model says."""
     items = sorted(batch, key=lambda it: (it.get("ts", 0), it.get("time", 0)))
     batch_mids = {str(it.get("msg_id")) for it in items}
+    now = time.time()
+    background = collect_group_background(session, batch_mids)
 
-    bg_lines = [f"{group_speaker_label(a['uid'], a['name'])} {_indent_continuation(a['text'])}"
-                for a in collect_group_background(session, batch_mids)]
-
-    img_tag_prompt = L("[发送了图片]", "[Sent an Image]")
-    img_tag_hist = L("[图片]", "[Image]")
-    now_lines, hist_lines = [], []
-    all_images, all_audios = [], []
+    # --- Open media in the background chat (newest first, at most group_context_media messages)
+    budget = max(0, to_int(config.get("group_context_media", 2), 2))
+    try:
+        media_age = float(config.get("group_context_media_max_age_sec", 300) or 300)
+    except (TypeError, ValueError):
+        media_age = 300.0
+    first_ts = {}
     for it in items:
+        first_ts[it["uid"]] = min(first_ts.get(it["uid"], it.get("ts", now)), it.get("ts", now))
+    bg_ids = {id(a) for a in background}
+    # The asker's own picture/file sent just before calling the bot (even if before the bot's last reply)
+    own_recent = [a for a in list(session.ambient)
+                  if a.get("media_segments") and a.get("uid") in first_ts and id(a) not in bg_ids
+                  and str(a.get("mid")) not in batch_mids and 0 <= first_ts[a["uid"]] - a.get("ts", 0) <= 90]
+    candidates = sorted(own_recent, key=lambda a: a.get("ts", 0), reverse=True)
+    candidates += [a for a in reversed(background) if a.get("media_segments") and now - a.get("ts", now) <= media_age]
+    opened = []
+    for a in candidates:
+        if len(opened) >= budget:
+            break
+        if "opened" not in a:   # cached, so a restarted reply does not download again
+            a["opened"] = open_group_media(session, a["media_segments"], a["uid"], a["name"], "background", a.get("ts", now))
+        opened.append(a)
+    shown = sorted(background + [a for a in opened if id(a) not in bg_ids], key=lambda a: a.get("ts", 0))
+
+    # --- Number every picture: messages to the bot first, then background; at most 4, no duplicates
+    final, seen_hashes = [], set()
+
+    def _take(att):
+        digest = hashlib.sha256(att["raw"]).hexdigest()
+        if digest in seen_hashes or len(final) >= MAX_GROUP_ATTACHMENTS:
+            return None
+        seen_hashes.add(digest)
+        final.append(att)
+        return len(final)
+
+    item_nums = [[n for n in (_take(att) for att in (it.get("attachments") or [])) if n] for it in items]
+    opened_nums = {}
+    for a in sorted(opened, key=lambda a: a.get("ts", 0)):
+        opened_nums[id(a)] = [n for n in (_take(att) for att in a["opened"][1]) if n]
+
+    # --- Stickers the bot looked at go into the library so they can be sent again later
+    #     (the Master's stickers are shared everywhere; other members' stay in this group)
+    log_notes = []
+    if config.get("enable_picture_database", True):
+        for att in final:
+            if att.get("is_sticker") and not att.get("pic_id"):
+                from_master = is_master(att["uid"])
+                scope = PICTURE_SCOPE_PUBLIC if from_master else f"group_{session.target_id}"
+                tags = ["表情包", "动图", L("主人发的", "from Master") if from_master else f"QQ{att['uid']}"]
+                entry = save_to_picture_database(att["raw"], sender_id=att["uid"], tags=tags,
+                                                 summary=att.get("summary") or L("群聊里的表情包", "sticker from a group chat"),
+                                                 scope=scope)
+                att["pic_id"] = (entry or {}).get("id")
+                if att["pic_id"]:
+                    who = group_speaker_label(att["uid"], att.get("name", ""))
+                    log_notes.append(L(f"{who}发的表情包已存入图库，ID: {att['pic_id']}",
+                                       f"Sticker from {who} saved to the library as {att['pic_id']}"))
+    if final:
+        session.latest_image_bytes = final[0]["raw"]
+        session.latest_image_is_sticker = bool(final[0].get("is_sticker"))
+
+    # --- Background section (opened messages show their full content)
+    bg_lines = []
+    for a in shown:
+        if id(a) in opened_nums:
+            txt = (a["opened"][0] or a["text"])[:1500] + _attachment_ref(opened_nums[id(a)])
+        else:
+            txt = a["text"]
+        bg_lines.append(f"{group_speaker_label(a['uid'], a['name'])} {_indent_continuation(txt)}")
+
+    # --- Messages addressed to the bot
+    now_lines = []
+    all_audios = []
+    for it, nums in zip(items, item_nums):
         label = group_speaker_label(it["uid"], it["name"])
         how = _trigger_note(it.get("reasons"))
         txt = (it.get("text") or "").strip()
-        imgs = it.get("images") or []
         auds = it.get("audios") or []
-        if not txt and not imgs and not auds:
+        if not txt and not nums and not auds:
             txt = L("（只叫了你一下，没有说别的）", "(just called you, nothing else)")
-        p_txt = f"{txt} {img_tag_prompt}".strip() if imgs else txt
-        h_txt = f"{txt} {img_tag_hist}".strip() if imgs else txt
-        line_p = f"{label}{how} {_indent_continuation(p_txt)}"
-        line_h = f"{label}{how} {_indent_continuation(h_txt)}"
+        line = f"{label}{how} {_indent_continuation((txt + _attachment_ref(nums)).strip())}"
         if it.get("quote"):
-            line_p += f"\n    {it['quote']}"
-            line_h += f"\n    {it['quote']}"
-        now_lines.append(line_p)
-        hist_lines.append(line_h)
-        all_images.extend(imgs)
+            line += f"\n    {it['quote']}"
+        now_lines.append(line)
         all_audios.extend(auds)
+    for a in opened:
+        all_audios.extend(a["opened"][2] or [])
 
     sections = []
     if bg_lines:
@@ -3342,6 +3456,11 @@ def build_group_turn(session: ChatSession, batch: list) -> tuple:
                           "【Background Messages (recent group chat for context; no need to reply to each)】")
                         + "\n" + "\n".join(bg_lines))
     sections.append(L("【需要你回应的消息】", "【Messages For You】") + "\n" + "\n".join(now_lines))
+    hist_lines = list(now_lines)
+    if final:
+        described = "\n".join(_describe_attachment(n, att) for n, att in enumerate(final, 1))
+        sections.append(L("【附图说明（图片按这个顺序附在本条消息后面）】", "【Attached images (in this order)】") + "\n" + described)
+        hist_lines.append(L("【当时附上的图片】", "【Images attached at the time】") + "\n" + described)
     prompt = "\n\n".join(sections)
     history_text = "\n".join(hist_lines)
 
@@ -3359,8 +3478,9 @@ def build_group_turn(session: ChatSession, batch: list) -> tuple:
         "reply_to": items[-1].get("msg_id") if items else None,
         "primary_uid": items[-1].get("uid") if items else None,
         "provenance": provenance,
+        "log_notes": log_notes,
     }
-    return prompt, history_text, all_images[:4], all_audios, ctx
+    return prompt, history_text, [att["b64"] for att in final], all_audios, ctx
 
 def dispatch_text_bubbles(session: ChatSession, clean_text_reply: str, ctx: dict):
     # Multi-bubble message sending: split by [SEP] delimiter
@@ -3408,8 +3528,9 @@ def _worker_generation_thread(session: ChatSession, batch_to_process: list, gen_
                     session.generation_id = 0
     finally:
         with session.lock:
-            session.busy = False
-            if not session.interruptible and session.pending:
+            if session.active_worker_gen == gen_id:
+                session.active_worker_gen = 0
+            if not session.interruptible and session.pending and not session.active_worker_gen:
                 # Group chat: handle the messages that arrived while this reply was being written
                 session.generation_id += 1
                 session.first_message_time = time.time()
@@ -3521,6 +3642,8 @@ def _run_generation(session: ChatSession, batch_to_process: list, gen_id: int):
         append_to_full_chat_history(session, "assistant", "[Model refused to reply]", sender_id=config.get("bot_qq"))
         if session.is_group:
             session.last_reply_time = time.time()
+            for note in ctx.get("log_notes") or []:
+                append_to_full_chat_history(session, "note", note)
         with session.lock:
             if gen_id == session.generation_id and not session.pending and not session.in_flight:
                 session.generation_id = 0
@@ -3528,6 +3651,8 @@ def _run_generation(session: ChatSession, batch_to_process: list, gen_id: int):
 
     # Record to persistent memory & chat logs ONLY for the confirmed winning reply
     record_chat_turn(session, history_record_text, reply, has_image=bool(all_images))
+    for note in ctx.get("log_notes") or []:
+        append_to_full_chat_history(session, "note", note)
 
     # Execute actions (custom pictures, stickers, QQ faces, voice, poke, memory updates)
     execute_action_tags(session, reply, ctx)
@@ -3891,7 +4016,7 @@ def get_quoted_sender(session: ChatSession, mid) -> int:
     return uid
 
 def detect_group_trigger(session: ChatSession, segments: list) -> tuple:
-    """Returns (reasons, quoted_message_id). reasons is a subset of {"at", "reply", "keyword"}."""
+    """Returns (reasons, quoted_message_id, quoted_is_bot); reasons is a subset of {"at", "reply", "keyword"}."""
     reasons = set()
     quoted_mid = None
     bot = str(get_bot_qq())
@@ -3906,12 +4031,14 @@ def detect_group_trigger(session: ChatSession, segments: list) -> tuple:
             quoted_mid = d.get("id")
         elif stype == "text":
             texts.append(str(d.get("text", "")))
-    if quoted_mid not in (None, "") and config.get("group_trigger_on_reply", True):
-        if quoted_mid in session.bot_msg_ids or get_quoted_sender(session, quoted_mid) == to_int(bot):
+    quoted_is_bot = False
+    if quoted_mid not in (None, ""):
+        quoted_is_bot = quoted_mid in session.bot_msg_ids or get_quoted_sender(session, quoted_mid) == to_int(bot)
+        if quoted_is_bot and config.get("group_trigger_on_reply", True):
             reasons.add("reply")
     if text_has_trigger_keyword("".join(texts), get_group_trigger_keywords()):
         reasons.add("keyword")
-    return reasons, quoted_mid
+    return reasons, quoted_mid, quoted_is_bot
 
 def _quota_params() -> tuple:
     limit = to_int(config.get("group_member_msg_limit", 10), 10)
@@ -3985,7 +4112,7 @@ def maybe_send_limit_notice(session: ChatSession, uid: int, segments: list):
     notice = str(config.get("group_member_limit_notice") or "").strip()
     if not notice:
         return
-    reasons, _ = detect_group_trigger(session, segments)
+    reasons = detect_group_trigger(session, segments)[0]
     if not reasons:
         return
     _, window = _quota_params()
@@ -3996,16 +4123,52 @@ def maybe_send_limit_notice(session: ChatSession, uid: int, segments: list):
     session.limit_notified[uid] = now
     send_to_session(session, [{"type": "at", "data": {"qq": str(uid)}}, {"type": "text", "data": {"text": " " + notice}}])
 
-def download_group_images(session: ChatSession, image_datas: list, max_n: int = 2) -> list:
+GROUP_MEDIA_TYPES = {"image", "record", "file", "forward", "node", "json"}
+
+def _is_sticker_data(d: dict) -> bool:
+    return str(d.get("subType", d.get("sub_type", ""))) == "1" or "表情" in str(d.get("summary") or "")
+
+def download_group_images(session: ChatSession, image_datas: list, uid: int, name: str,
+                          source: str, ts: float, max_n: int = 4) -> list:
+    """Downloads group pictures (public QQ CDN only) and keeps what the prompt and the
+    library need: who sent it, where it came from, sticker or photo, raw bytes."""
     out = []
     for d in image_datas[:max_n]:
-        b64, raw = download_image_data(str(d.get("url") or ""), str(d.get("file") or ""), strict=True)
+        url = str(d.get("url") or "")
+        b64, raw = download_image_data(url, str(d.get("file") or ""), strict=True)
+        host = urllib.parse.urlparse(html.unescape(url)).hostname or "-"
         if b64:
-            out.append(b64)
-            session.latest_image_bytes = raw
-            summ = str(d.get("summary") or "")
-            session.latest_image_is_sticker = str(d.get("subType", d.get("sub_type", ""))) == "1" or "表情" in summ
+            out.append({"b64": b64, "raw": raw, "is_sticker": _is_sticker_data(d),
+                        "summary": _cq_unescape(str(d.get("summary") or "")).strip(),
+                        "uid": uid, "name": name, "source": source, "ts": ts, "pic_id": None})
+            logging.info(f"[group {session.target_id}] Opened a picture from {uid} ({len(raw)} bytes, host {host}).")
+        else:
+            logging.warning(f"[group {session.target_id}] Could not download a picture from {uid} (host {host}).")
     return out
+
+def open_group_media(session: ChatSession, segments: list, uid: int, name: str, source: str, ts: float) -> tuple:
+    """Full parse of one group message. Files, forwarded chats and voice go through the normal
+    parser; pictures are downloaded here so each one keeps its own metadata.
+    Returns (text, attachments, audios)."""
+    image_datas, parse_segs = [], []
+    for seg in segments:
+        if seg.get("type") == "image":
+            d = seg.get("data") or {}
+            image_datas.append(d)
+            parse_segs.append({"type": "text", "data": {"text": L("[表情包]", "[sticker]") if _is_sticker_data(d) else L("[图片]", "[image]")}})
+        else:
+            parse_segs.append(seg)
+    text, _, audios, _ = parse_incoming_cq_content(segments_to_cq_for_group(parse_segs, session), uid, session)
+    attachments = download_group_images(session, image_datas, uid, name, source, ts)
+    return sanitize_untrusted_text(text), attachments, audios
+
+def _addressed_elsewhere(segments: list, quoted_mid, quoted_is_bot: bool) -> bool:
+    """True when a message clearly talks to someone else (@s another person or quotes them)."""
+    bot = str(get_bot_qq())
+    for seg in segments:
+        if seg.get("type") == "at" and str((seg.get("data") or {}).get("qq", "")).strip() != bot:
+            return True
+    return quoted_mid not in (None, "") and not quoted_is_bot
 
 def handle_group_message(session: ChatSession, m: dict, background_only: bool = False):
     uid = to_int(m.get("user_id") or (m.get("sender") or {}).get("user_id"), 0)
@@ -4033,16 +4196,27 @@ def handle_group_message(session: ChatSession, m: dict, background_only: bool = 
         return
 
     brief, image_datas = render_segments_brief(segments, session)
-    reasons, quoted_mid = (set(), None) if background_only else detect_group_trigger(session, segments)
+    if background_only:
+        reasons, quoted_mid, quoted_is_bot = set(), None, False
+    else:
+        reasons, quoted_mid, quoted_is_bot = detect_group_trigger(session, segments)
     ts = float(to_int(m.get("time"), int(time.time())))
     mid = m.get("message_id")
+    now = time.time()
+
+    # Consecutive messages: right after calling the bot, the same person's next messages
+    # (e.g. "@bot" and then a picture) belong to the same request, like in private chat.
+    consecutive = (not background_only) and now <= session.followup_until.get(uid, 0)
+    if not reasons and consecutive and not _addressed_elsewhere(segments, quoted_mid, quoted_is_bot):
+        reasons = {"followup"}
 
     if not reasons:
         if brief or image_datas:
-            session.ambient.append({
-                "mid": mid, "uid": uid, "name": name, "text": brief or L("[消息]", "[message]"),
-                "ts": ts, "seen_at": time.time(), "images": image_datas[:2]
-            })
+            entry = {"mid": mid, "uid": uid, "name": name, "text": brief or L("[消息]", "[message]"),
+                     "ts": ts, "seen_at": now}
+            if any(seg.get("type") in GROUP_MEDIA_TYPES for seg in segments):
+                entry["media_segments"] = list(segments)   # opened later, only if the bot gets called
+            session.ambient.append(entry)
             if config.get("group_log_ambient", True) and not background_only:
                 append_to_full_chat_history(session, "user", brief, sender_id=uid, has_image=bool(image_datas),
                                             msg_id=mid, sender_name=name)
@@ -4055,19 +4229,27 @@ def handle_group_message(session: ChatSession, m: dict, background_only: bool = 
             return
         logging.info(f"[group {session.target_id}] Member {uid} has used {used}/{limit} messages in the current window.")
 
+    try:
+        window = float(config.get("group_followup_window_sec", 10) or 0)
+    except (TypeError, ValueError):
+        window = 10.0
+    if window > 0:
+        if len(session.followup_until) > 500:
+            session.followup_until = {k: v for k, v in session.followup_until.items() if v > now}
+        session.followup_until[uid] = now + window
+
     append_to_full_chat_history(session, "user", brief, sender_id=uid, has_image=bool(image_datas), msg_id=mid, sender_name=name)
     logging.info(f"Incoming [group {session.target_id}] (MsgID: {mid}) from {uid}{' (master)' if master else ''} via {'/'.join(sorted(reasons))}: {brief[:120]}")
     threading.Thread(target=process_group_trigger,
-                     args=(session, m, segments, uid, name, master, reasons, quoted_mid, ts),
+                     args=(session, m, segments, uid, name, master, reasons, quoted_mid, ts, consecutive),
                      daemon=True).start()
 
 def process_group_trigger(session: ChatSession, m: dict, segments: list, uid: int, name: str,
-                          master: bool, reasons: set, quoted_mid, ts: float):
-    """Full parse of a message addressed to the bot (media, files, quote), then queue it."""
+                          master: bool, reasons: set, quoted_mid, ts: float, consecutive: bool = False):
+    """Full parse of a message addressed to the bot (pictures, files, forwards, quote), then queue it."""
     try:
-        cq_text = segments_to_cq_for_group(segments, session)
-        clean_text, images_b64, audios_data, _ = parse_incoming_cq_content(cq_text, uid, session)
-        clean_text = sanitize_untrusted_text(clean_text)
+        source = "followup" if "followup" in reasons else "this"
+        clean_text, attachments, audios_data = open_group_media(session, segments, uid, name, source, ts)
 
         quote_note = ""
         if quoted_mid not in (None, ""):
@@ -4076,21 +4258,21 @@ def process_group_trigger(session: ChatSession, m: dict, segments: list, uid: in
                 q_sender = qd.get("sender") or {}
                 q_uid = to_int(qd.get("user_id") or q_sender.get("user_id"), 0)
                 q_name = sanitize_display_name(q_sender.get("card") or q_sender.get("nickname") or "")
-                q_brief, q_images = render_segments_brief(get_message_segments(qd), session, max_len=300)
+                q_segments = get_message_segments(qd)
+                q_brief, _ = render_segments_brief(q_segments, session, max_len=300)
                 if q_uid == get_bot_qq() or quoted_mid in session.bot_msg_ids:
                     quote_note = L(f"（回复的是你之前说的：“{q_brief}”）", f"(replying to what you said: \"{q_brief}\")")
                 else:
-                    quote_note = L(f"（引用了{group_speaker_label(q_uid, q_name)}的消息：“{q_brief}”）",
-                                   f"(quoting {group_speaker_label(q_uid, q_name)}: \"{q_brief}\")")
-                if not images_b64 and q_images:
-                    images_b64.extend(download_group_images(session, q_images))
-
-        if not images_b64:
-            # "Send a picture, then ask the bot about it": use that member's picture from just before
-            for a in reversed(list(session.ambient)):
-                if a.get("uid") == uid and a.get("images") and 0 <= ts - a.get("ts", 0) <= 90:
-                    images_b64.extend(download_group_images(session, a["images"]))
-                    break
+                    q_text = q_brief
+                    if any(seg.get("type") in GROUP_MEDIA_TYPES for seg in q_segments):
+                        # Open what the quoted message contains (pictures, forwarded chats, files)
+                        q_text, q_atts, q_auds = open_group_media(session, q_segments, q_uid, q_name, "quote",
+                                                                  float(to_int(qd.get("time"), int(ts))))
+                        q_text = (q_text or q_brief)[:1500]
+                        attachments.extend(q_atts)
+                        audios_data.extend(q_auds)
+                    quote_note = L(f"（引用了{group_speaker_label(q_uid, q_name)}的消息：“{q_text}”）",
+                                   f"(quoting {group_speaker_label(q_uid, q_name)}: \"{q_text}\")")
 
         enqueue_session_message(session, {
             "msg_id": m.get("message_id"),
@@ -4100,11 +4282,12 @@ def process_group_trigger(session: ChatSession, m: dict, segments: list, uid: in
             "text": clean_text,
             "quote": quote_note,
             "reasons": sorted(reasons),
-            "images": images_b64,
+            "attachments": attachments,
+            "images": [a["b64"] for a in attachments],
             "audios": audios_data,
             "time": time.time(),
             "ts": ts
-        })
+        }, allow_interrupt=consecutive)
     except Exception as e:
         logging.error(f"[group {session.target_id}] Failed to process triggered message: {e}")
         traceback.print_exc()

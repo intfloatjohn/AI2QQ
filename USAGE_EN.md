@@ -254,6 +254,7 @@ python3 mcp-server/onebot_mcp.py
 * `poll_interval_sec`: Polling interval for new messages (recommended: 0.6 ~ 1.0s).
 * `compact_threshold` / `compact_keep_recent`: Turn threshold for long-term memory summarization.
 * Group chat settings (`enable_group_chat`, `group_whitelist`, ...) are described in [Section 15](#15-group-chat).
+* `onebot_access_token`: if NapCat's HTTP server has a token (e.g. NapCat runs on another machine), put the same value here and the bot sends it as `Authorization: Bearer`.
 
 ---
 
@@ -284,6 +285,12 @@ chmod +x setup.sh start.sh
 ./setup.sh    # Initial dependency installation and environment check
 ./start.sh    # Daily startup and auto-reconnect daemon
 ```
+
+### Safe defaults
+- The OneBot HTTP API (port 3000) has no token, so the launcher makes it listen on `127.0.0.1` only. Older configs set to `0.0.0.0` are switched back automatically, as long as `onebot_http_api` points at this machine. If NapCat's config file is owned by root and can't be changed, the launcher prints what to fix with sudo.
+- Newly created NapCat containers get a random WebUI token instead of the public default `napcat`.
+- The launch banner no longer looks up or prints the server's public IP, and shows only the first and last two characters of the WebUI token. Show the full token with `sudo grep token /opt/napcat/config/webui.json`.
+- To reach the WebUI remotely, use an SSH tunnel: `ssh -L 6099:127.0.0.1:6099 user@server`, then open `http://127.0.0.1:6099/webui` on your own computer. Don't open ports 6099 or 3000 to the internet in your cloud firewall.
 
 ---
 
@@ -327,9 +334,14 @@ A group message is passed to the model only if at least one of these is true:
 
 Other group messages don't trigger a reply; they are only shown to the model as "background messages" the next time it is called. Even when called, the model may answer `[NO_REPLY]` if it was only mentioned in passing.
 
-More details:
-- If a member posts a picture and then calls the bot to ask "what is this?", that member's picture is attached automatically; quoting a picture message works too.
-- While a reply is being generated, new group messages wait in a queue and are handled right after it (private chat keeps its original "interrupt and merge" behaviour).
+**Consecutive messages**: after someone calls the bot, their next messages within a few seconds (for example "@bot" and then a picture) belong to the same request, just like consecutive messages in private chat. If the reply is still being written, it restarts with the new message included. Messages that @ or quote someone else don't count. The window is `group_followup_window_sec` (default 10 seconds).
+
+**Pictures, stickers, files and forwarded chats**:
+- Pictures in the message that calls the bot, in follow-up messages and in a quoted message are opened for the model.
+- From what was posted since the bot's last reply, the most recent `group_context_media` pictures / forwarded chats / files / voice messages are opened (default 2, within 5 minutes). So "@bot what do you think?" can see a picture someone else just posted.
+- At most 4 pictures are attached per reply, with a note telling the model who posted each one.
+- Stickers the bot has looked at are saved to the library automatically, and the model is told their library ID so it can resend one with `[PICTURE: ID]`. Stickers from the Master are shared; other members' stickers stay in that group. Ordinary photos are not saved automatically (use `[SAVE_STICKER: …]` when wanted).
+- While a reply is being written, other people's new messages wait in a queue and are handled right after it (private chat keeps its original "interrupt and merge" behaviour).
 - Group replies are shorter, split into at most `group_max_bubbles` bubbles, and by default the first bubble @'s the person who asked.
 
 ### 15.3 Identity: QQ ID only, never nicknames
@@ -385,6 +397,9 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 | `group_reply_with_quote` | `false` | Quote the asker's message in the reply |
 | `group_context_messages` | `12` | Recent group messages given as background |
 | `group_context_max_age_sec` | `900` | Max age of background messages (seconds) |
+| `group_followup_window_sec` | `10` | After calling the bot, how long the same person's next messages count as the same request (seconds); `0` = off |
+| `group_context_media` | `2` | Recent background media (pictures/forwards/files/voice) opened when the bot is called; `0` = none |
+| `group_context_media_max_age_sec` | `300` | Only background media newer than this is opened (seconds) |
 | `group_max_tokens` | `800` | Max tokens for a group reply |
 | `group_max_bubbles` | `3` | Max bubbles per group reply |
 | `group_memory_max_chars` | `3000` | Size cap of each group's long-term memory (oldest entries dropped) |
