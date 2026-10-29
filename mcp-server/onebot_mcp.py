@@ -36,6 +36,7 @@ ONEBOT_HTTP_API = "http://127.0.0.1:3000"
 WEBHOOK_HOST = "127.0.0.1"
 WEBHOOK_PORT = 3002
 MASTER_QQ = 123456789
+ONEBOT_ACCESS_TOKEN = ""
 
 if os.path.exists(CONFIG_FILE):
     try:
@@ -43,6 +44,7 @@ if os.path.exists(CONFIG_FILE):
             cdata = json.load(cf)
             ONEBOT_HTTP_API = cdata.get("onebot_http_api", ONEBOT_HTTP_API)
             MASTER_QQ = cdata.get("master_qq", MASTER_QQ)
+            ONEBOT_ACCESS_TOKEN = str(cdata.get("onebot_access_token") or "").strip()
     except Exception:
         pass
 
@@ -62,6 +64,8 @@ companion_state = {
 def call_onebot_api(endpoint: str, payload: dict = None) -> dict:
     url = f"{ONEBOT_HTTP_API}/{endpoint.lstrip('/')}"
     headers = {"Content-Type": "application/json"}
+    if ONEBOT_ACCESS_TOKEN:
+        headers["Authorization"] = f"Bearer {ONEBOT_ACCESS_TOKEN}"
     data = json.dumps(payload or {}).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:

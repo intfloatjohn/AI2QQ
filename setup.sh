@@ -97,7 +97,14 @@ check_onebot_online() {
     curl -s --connect-timeout 2 "${ONEBOT_API}/get_status" >/dev/null 2>&1
 }
 
-# Auto-inject OneBot 11 HTTP Server (port 3000) into NapCat configuration files
+# Random WebUI token for newly created NapCat containers (never a fixed, publicly known one)
+gen_webui_token() {
+    python3 -c "import secrets; print(secrets.token_urlsafe(12))" 2>/dev/null || head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n'
+}
+
+# Auto-inject OneBot 11 HTTP Server (port 3000) into NapCat configuration files.
+# The bot talks to NapCat on this same machine, so the API (which has no access token)
+# is bound to 127.0.0.1 instead of every network interface.
 auto_enable_napcat_http() {
     python3 -c "
 import json, os, glob
@@ -106,7 +113,7 @@ template_http = {
     'name': 'AI2QQ HTTP Server',
     'enable': True,
     'port': 3000,
-    'host': '0.0.0.0',
+    'host': '127.0.0.1',
     'enableCors': True,
     'enableWebsocket': False,
     'messagePostFormat': 'array',
@@ -118,19 +125,30 @@ template_ws = {
     'name': 'AI2QQ WS Server',
     'enable': True,
     'port': 3001,
-    'host': '0.0.0.0'
+    'host': '127.0.0.1'
 }
 
 config_dirs = ['/opt/napcat/config', os.path.expanduser('~/.napcat/config')]
 modified = False
 
 cfg_bot_qq = ''
+local_api = True
 try:
     with open('config.json', 'r', encoding='utf-8') as f:
         cfg = json.load(f)
         cfg_bot_qq = str(cfg.get('bot_qq') or '')
+        api = str(cfg.get('onebot_http_api') or 'http://127.0.0.1:3000')
+        local_api = ('127.0.0.1' in api) or ('localhost' in api)
 except Exception:
     pass
+
+def lock_to_localhost(server, fpath):
+    # An API without an access token must not listen on every network interface
+    if local_api and not str(server.get('token') or '') and str(server.get('host') or '').strip() in ('', '0.0.0.0', '::'):
+        server['host'] = '127.0.0.1'
+        print('REBOUND:' + fpath)
+        return True
+    return False
 
 for cdir in config_dirs:
     if not os.path.exists(cdir):
@@ -146,6 +164,7 @@ for cdir in config_dirs:
 
     for fpath in target_files:
         data = {}
+        changed = False
         if os.path.exists(fpath):
             try:
                 with open(fpath, 'r', encoding='utf-8') as f:
@@ -164,26 +183,51 @@ for cdir in config_dirs:
             if s.get('port') == 3000:
                 if not s.get('enable'):
                     s['enable'] = True
-                    modified = True
+                    changed = True
+                if lock_to_localhost(s, fpath):
+                    changed = True
                 has_3000 = True
                 break
         if not has_3000:
-            servers.append(template_http)
-            modified = True
+            servers.append(dict(template_http))
+            changed = True
 
         data['httpServers'] = data['network']['httpServers']
         if 'websocketServers' not in data['network']:
-            data['network']['websocketServers'] = [template_ws]
+            data['network']['websocketServers'] = [dict(template_ws)]
+        for ws in data['network']['websocketServers']:
+            if ws.get('port') == 3001 and lock_to_localhost(ws, fpath):
+                changed = True
 
         try:
             with open(fpath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            if changed:
+                modified = True
+        except PermissionError:
+            if changed:
+                print('PERMISSION:' + fpath)
         except Exception:
             pass
 
 if modified:
     print('MODIFIED')
 "
+}
+
+# Reports what the config patch changed or could not change (each note at most once per run)
+show_napcat_security_notes() {
+    if [ -z "$AI2QQ_NOTE_REBOUND" ] && echo "$1" | grep -q "^REBOUND:" && ! echo "$1" | grep -q "^PERMISSION:"; then
+        AI2QQ_NOTE_REBOUND=1
+        echo "[security] OneBot API (port 3000) now listens on 127.0.0.1 only. It has no access token and was reachable from the network."
+    fi
+    if [ -z "$AI2QQ_NOTE_PERMISSION" ] && echo "$1" | grep -q "^PERMISSION:"; then
+        AI2QQ_NOTE_PERMISSION=1
+        echo "[!] Security: the OneBot API has no access token and listens on every network interface,"
+        echo "    but this NapCat config file is owned by root, so it could not be fixed automatically:"
+        echo "$1" | grep "^PERMISSION:" | sed 's/^PERMISSION:/      /' | sort -u
+        echo "    Fix: edit it with sudo, set the port 3000 entry's \"host\" to \"127.0.0.1\", then restart NapCat."
+    fi
 }
 
 if check_onebot_online; then
@@ -295,7 +339,8 @@ else
 
             # Pre-ensure directories and initial HTTP 3000 template
             sudo -n mkdir -p /opt/napcat/config /opt/napcat/qq 2>/dev/null || mkdir -p "$HOME/.napcat/config" "$HOME/.napcat/qq" 2>/dev/null || true
-            auto_enable_napcat_http >/dev/null 2>&1 || true
+            PATCH_OUT=$(auto_enable_napcat_http 2>/dev/null || true)
+            show_napcat_security_notes "$PATCH_OUT"
 
             if $DOCKER_CMD ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^napcat$"; then
                 CONTAINER_STATUS=$($DOCKER_CMD inspect -f '{{.State.Status}}' napcat 2>/dev/null || echo "unknown")
@@ -303,6 +348,7 @@ else
                     echo "[+] Container 'napcat' is already running."
                     if ! check_onebot_online; then
                         MOD=$(auto_enable_napcat_http 2>/dev/null || true)
+                        show_napcat_security_notes "$MOD"
                         if echo "$MOD" | grep -q "MODIFIED"; then
                             echo "[*] Auto-enabling OneBot 11 HTTP server (port 3000) and restarting NapCat..."
                             $DOCKER_CMD restart napcat >/dev/null 2>&1 || true
@@ -333,7 +379,7 @@ else
                     --name napcat \
                     --restart always \
                     --network host \
-                    -e WEBUI_TOKEN=napcat \
+                    -e WEBUI_TOKEN="$(gen_webui_token)" \
                     -v /opt/napcat/config:/app/napcat/config \
                     -v /opt/napcat/qq:/app/.config/QQ \
                     "$CHOSEN_IMG"
@@ -353,36 +399,47 @@ else
             echo ""
 
             if ! check_onebot_online; then
-                PUBLIC_IP=$(curl -s --connect-timeout 2 http://ifconfig.me 2>/dev/null || curl -s --connect-timeout 2 http://api.ipify.org 2>/dev/null || echo "127.0.0.1")
-
-                # Extract real WebUI token from config if available, fallback to napcat
-                WEBUI_TOKEN_VAL=$(python3 -c "
+                # Never look up or print this server's public IP; show the WebUI token partly hidden
+                WEBUI_INFO=$(python3 -c "
 import json, os
-token = 'napcat'
+token, host = '', ''
 for p in ['/opt/napcat/config/webui.json', os.path.expanduser('~/.napcat/config/webui.json')]:
     if os.path.exists(p):
         try:
             with open(p, 'r', encoding='utf-8') as f:
-                t = json.load(f).get('token')
-                if t:
-                    token = str(t)
-                    break
+                w = json.load(f)
+            token, host = str(w.get('token') or ''), str(w.get('host') or '')
+            break
         except Exception:
             pass
-print(token)
-" 2>/dev/null || echo "napcat")
+if not token:
+    masked = '(not created yet)'
+elif len(token) > 4:
+    masked = token[:2] + '*' * max(len(token) - 4, 4) + token[-2:]
+else:
+    masked = '*' * len(token)
+print(masked)
+print(('E' if host in ('', '0.0.0.0', '::') else '') + ('D' if token == 'napcat' else ''))
+" 2>/dev/null || printf '(unknown)\n\n')
+                WEBUI_TOKEN_MASKED=$(echo "$WEBUI_INFO" | sed -n 1p)
+                WEBUI_FLAGS=$(echo "$WEBUI_INFO" | sed -n 2p)
 
                 echo "=================================================================="
                 echo " [!] NapCat is waiting for Mobile QQ QR code login!"
                 echo "------------------------------------------------------------------"
-                echo " WebUI Dashboard : http://${PUBLIC_IP}:6099/webui"
-                echo " Local Dashboard : http://127.0.0.1:6099/webui"
-                echo " WebUI Token     : ${WEBUI_TOKEN_VAL}"
-                echo " Direct URL      : http://${PUBLIC_IP}:6099/webui?token=${WEBUI_TOKEN_VAL}"
-                echo "------------------------------------------------------------------"
-                echo " * If WebUI is unreachable on Cloud VPS (AliCloud/Tencent/AWS):"
-                echo "   1) Allow port 6099 in Cloud Security Group (安全组入方向放行 6099)"
-                echo "   2) Or use SSH Tunnel: ssh -L 6099:127.0.0.1:6099 root@${PUBLIC_IP}"
+                echo " Scan the QR code printed below with Mobile QQ (the WebUI is optional)."
+                echo " WebUI (this machine)  : http://127.0.0.1:6099/webui"
+                echo " WebUI token           : ${WEBUI_TOKEN_MASKED}"
+                echo "   full token          : sudo grep token /opt/napcat/config/webui.json"
+                echo " From another computer : ssh -L 6099:127.0.0.1:6099 <user>@<server-address>"
+                echo "   then open http://127.0.0.1:6099/webui in that computer's browser"
+                if echo "$WEBUI_FLAGS" | grep -q "D"; then
+                    echo " [!] The WebUI still uses the public default token 'napcat'. Change it in the WebUI settings."
+                fi
+                if echo "$WEBUI_FLAGS" | grep -q "E"; then
+                    echo " [!] The WebUI listens on every network interface. Don't open port 6099 to the internet;"
+                    echo "     use the SSH tunnel above, or set \"host\": \"127.0.0.1\" in webui.json."
+                fi
                 echo "=================================================================="
                 echo ""
                 echo "[*] Displaying latest QR code below (Scan with Mobile QQ):"
@@ -468,6 +525,7 @@ for line in sys.stdin:
                     sleep 2
                     if [ $RESTARTED_FOR_HTTP -lt 2 ]; then
                         OUT=$(auto_enable_napcat_http 2>/dev/null || true)
+                        show_napcat_security_notes "$OUT"
                         if echo "$OUT" | grep -q "MODIFIED"; then
                             echo ""
                             echo "[*] Detected newly generated NapCat config. Auto-enabling port 3000 and restarting NapCat..."
