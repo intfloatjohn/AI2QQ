@@ -120,7 +120,8 @@ config = {
     "group_trigger_keywords": [],             # Empty -> [bot_name] or the bot's QQ nickname
     "group_trigger_on_at": True,              # @bot triggers a reply
     "group_trigger_on_reply": True,           # Quoting one of the bot's messages triggers a reply
-    "group_member_msg_limit": 10,             # Per member (Master exempt); 0 = unlimited
+    # "group_member_msg_limit": per member (Master exempt); 0 = unlimited. Deliberately not set here:
+    # when config.json leaves it out, a WARNING is logged and GROUP_MEMBER_LIMIT_FALLBACK is used.
     "group_member_limit_window_sec": 86400,   # Rolling window; 0 = hard cap that never resets
     "group_member_limit_notice": "",          # Optional one-time notice when a member hits the limit
     "group_poll_interval_sec": 1.5,
@@ -4160,8 +4161,19 @@ def detect_group_trigger(session: ChatSession, segments: list) -> tuple:
         reasons.add("keyword")
     return reasons, quoted_mid, quoted_is_bot
 
+GROUP_MEMBER_LIMIT_FALLBACK = 50
+_limit_missing_warned = False
+
 def _quota_params() -> tuple:
-    limit = to_int(config.get("group_member_msg_limit", 10), 10)
+    global _limit_missing_warned
+    if "group_member_msg_limit" not in config:
+        if not _limit_missing_warned:
+            _limit_missing_warned = True
+            logging.warning(f"group_member_msg_limit is not set in config.json; using {GROUP_MEMBER_LIMIT_FALLBACK} "
+                            "messages per member. Set it explicitly (0 = unlimited) to silence this warning.")
+        limit = GROUP_MEMBER_LIMIT_FALLBACK
+    else:
+        limit = to_int(config.get("group_member_msg_limit"), GROUP_MEMBER_LIMIT_FALLBACK)
     try:
         window = float(config.get("group_member_limit_window_sec", 86400) or 0)
     except (TypeError, ValueError):
@@ -4347,6 +4359,8 @@ def handle_group_message(session: ChatSession, m: dict, background_only: bool = 
     if not master:
         allowed, used, limit = consume_member_quota(session, uid)
         if not allowed:
+            logging.info(f"[group {session.target_id}] Member {uid} reached the limit ({used}/{limit}); "
+                         f"ignoring message {mid}: {brief[:60]}")
             maybe_send_limit_notice(session, uid, segments)
             return
         logging.info(f"[group {session.target_id}] Member {uid} has used {used}/{limit} messages in the current window.")

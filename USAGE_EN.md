@@ -389,9 +389,9 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 - Only media it already opened is described, so there is no extra cost per picture.
 
 ### 15.6 Per-member message limit
-- Each member except the Master can trigger at most `group_member_msg_limit` replies per window (default: 10 per rolling 24 hours). Only messages that call the bot count; ordinary chatter does not.
+- Each member except the Master can trigger at most `group_member_msg_limit` replies per window (rolling 24 hours; if config.json leaves the setting out, 50 is used and a WARNING is logged). Only messages that call the bot count; ordinary chatter does not.
 - After that, the member's messages are **ignored completely** (not even used as background) until the count drops within the window.
-- `group_member_limit_window_sec: 0` makes it a permanent cap that never resets; `group_member_msg_limit: 0` disables the limit.
+- `group_member_limit_window_sec: 0` makes it a permanent cap that never resets; `group_member_msg_limit: 0` disables the limit. Each ignored message is logged as `reached the limit`.
 - Counters live in `quota.json` and survive restarts. To lift a limit manually, delete that group's `quota.json`.
 - Optional `group_member_limit_notice`: a one-time message when a member first hits the limit (empty by default = silent).
 
@@ -404,7 +404,7 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 | `group_trigger_keywords` | `[]` | Trigger words; empty = `bot_name` or the bot's QQ nickname |
 | `group_trigger_on_at` | `true` | Reply when @'d |
 | `group_trigger_on_reply` | `true` | Reply when one of the bot's messages is quoted |
-| `group_member_msg_limit` | `10` | Replies per member per window (Master exempt; `0` = unlimited) |
+| `group_member_msg_limit` | `50` if unset (with a warning) | Replies per member per window (Master exempt; `0` = unlimited) |
 | `group_member_limit_window_sec` | `86400` | Rolling window in seconds; `0` = never resets |
 | `group_member_limit_notice` | `""` | Optional notice when the limit is first hit (empty = silent) |
 | `group_reply_with_at` | `true` | @ the asker in the reply |
