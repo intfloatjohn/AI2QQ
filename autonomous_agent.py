@@ -1488,10 +1488,67 @@ def transcribe_voice_audio(audio_path: str) -> str:
 
     return ""
 
-def process_incoming_voice(file_id: str, file_url: str = "") -> str:
-    """Download incoming voice message, convert and transcribe via ASR."""
+def convert_audio_to_standard_mp3(src_path: str) -> str:
+    """Converts Silk/AMR/WAV/MP3 audio to standard 16kHz mono MP3 for ASR and multimodal LLMs."""
+    if not os.path.exists(src_path) or os.path.getsize(src_path) == 0:
+        return ""
+
+    input_path = src_path
+    temp_wav = None
+
+    # Check if Tencent Silk v3
+    is_silk = False
+    try:
+        with open(src_path, "rb") as f:
+            header = f.read(12)
+        if b"#!SILK_V3" in header:
+            is_silk = True
+    except Exception:
+        pass
+
+    if is_silk:
+        if SILKCODER_AVAILABLE:
+            temp_wav = src_path + ".silk_dec.wav"
+            try:
+                silkcoder.decode(src_path, temp_wav)
+                if os.path.exists(temp_wav) and os.path.getsize(temp_wav) > 0:
+                    input_path = temp_wav
+            except Exception as se:
+                logging.debug(f"silkcoder decode failed: {se}")
+        elif PILK_AVAILABLE:
+            temp_pcm = src_path + ".silk.pcm"
+            temp_wav = src_path + ".silk_dec.wav"
+            try:
+                pilk.decode(src_path, temp_pcm)
+                subprocess.run(["ffmpeg", "-y", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", temp_pcm, temp_wav],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                if os.path.exists(temp_pcm):
+                    try: os.remove(temp_pcm)
+                    except Exception: pass
+                if os.path.exists(temp_wav) and os.path.getsize(temp_wav) > 0:
+                    input_path = temp_wav
+            except Exception as pe:
+                logging.debug(f"pilk decode failed: {pe}")
+
+    mp3_target = src_path + ".std.mp3"
+    try:
+        res = subprocess.run(["ffmpeg", "-y", "-i", input_path, "-ar", "16000", "-ac", "1", "-b:a", "64k", mp3_target],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
+        if res.returncode == 0 and os.path.exists(mp3_target) and os.path.getsize(mp3_target) > 0:
+            return mp3_target
+    except Exception as e:
+        logging.warning(f"ffmpeg audio conversion failed: {e}")
+    finally:
+        if temp_wav and os.path.exists(temp_wav):
+            try: os.remove(temp_wav)
+            except Exception: pass
+
+    return src_path
+
+def process_incoming_voice(file_id: str, file_url: str = "") -> tuple:
+    """Download incoming voice message, convert and return description and multimodal audio object."""
     if not config.get("enable_voice_recognition", True):
-        return "（收到一条语音消息）"
+        return ("（收到一条语音消息）", None)
 
     local_path = ""
     if file_id:
@@ -1521,28 +1578,43 @@ def process_incoming_voice(file_id: str, file_url: str = "") -> str:
             logging.warning(f"Download voice from URL failed: {e}")
 
     if local_path and os.path.exists(local_path):
-        transcription = transcribe_voice_audio(local_path)
-        if transcription:
-            return f"[语音消息 (已转文字): \"{transcription}\"]"
+        std_mp3 = convert_audio_to_standard_mp3(local_path)
 
-        # Diagnostic annotation when transcription is not available:
-        model_name = config.get("model", "pure-text")
-        if any(m in model_name.lower() for m in ["gemini", "gpt-4o", "omni"]):
-            return f"[语音消息: 收到用户发送的语音 ({os.path.basename(local_path)})。提示：当前模型支持多模态，请结合对话上下文自然回复]"
+        # 1. Try ASR transcription first if available
+        transcription = transcribe_voice_audio(std_mp3 or local_path)
+        if transcription:
+            return (f"[语音消息 (已转文字): \"{transcription}\"]", None)
+
+        # 2. Check if model supports native multimodal audio (Gemini, GPT-4o, Omni)
+        model_name = config.get("model", "pure-text").lower()
+        model_supports_audio = any(m in model_name for m in ["gemini", "gpt-4o", "omni", "audio"])
+        
+        target_audio = std_mp3 if (std_mp3 and os.path.exists(std_mp3)) else local_path
+        if model_supports_audio and os.path.exists(target_audio):
+            try:
+                with open(target_audio, "rb") as af:
+                    b64_audio = base64.b64encode(af.read()).decode("utf-8")
+                audio_obj = {"data": b64_audio, "format": "mp3"}
+                logging.info(f"Attached multimodal input_audio from incoming voice ({os.path.basename(target_audio)}) for model {model_name}")
+                return ("[语音消息: 对方发送了一条语音消息，音频内容已作为语音附件输入，请认真收听并自然随性地回复对方]", audio_obj)
+            except Exception as ae:
+                logging.warning(f"Failed to encode audio for multimodal input: {ae}")
 
         return (
             f"[语音消息: 收到用户发送的语音 ({os.path.basename(local_path)})。"
-            f"系统提示：当前配置的模型为纯文本模型 ({model_name})，且后台暂未配置可用的 ASR 语音识别服务（可在 config.json 配置 asr_api_url）。"
-            f"请在回复中以拟人化口吻告知主人目前由于在纯文本环境无法收听语音内容，建议主人发文字交流]"
+            f"系统提示：当前配置的模型为纯文本模型 ({config.get('model', 'pure-text')})，且后台暂未配置可用的 ASR 语音识别服务。"
+            f"请在回复中礼貌告知对方你暂时无法收听语音，请对方发送文字。]",
+            None
         )
 
-    return "（收到一条语音消息，但音频文件获取失败）"
+    return ("（收到一条语音消息，但音频文件获取失败）", None)
 
 # ==============================================================================
 # Comprehensive Incoming Message Parser (Super Emojis, GIFs, Forwards, Files, Voice)
 # ==============================================================================
 def parse_incoming_cq_content(raw_text: str, sender_id: int = 0):
     images_b64 = []
+    audios_data = []
 
     # 1. Resolve Combined / Forwarded Chat History [CQ:forward,...]
     fwd_matches = re.findall(r'\[CQ:forward,[^\]]*?(?:id|res_id|forward_id)=([^\],]+)[^\]]*\]', raw_text, re.IGNORECASE)
@@ -1604,7 +1676,9 @@ def parse_incoming_cq_content(raw_text: str, sender_id: int = 0):
         v_fid_val = v_fid.group(1).strip() if v_fid else ""
         v_url = re.search(r'url=([^\],]+)', tag)
         v_url_val = v_url.group(1).strip() if v_url else ""
-        voice_desc = process_incoming_voice(v_fid_val, v_url_val)
+        voice_desc, audio_obj = process_incoming_voice(v_fid_val, v_url_val)
+        if audio_obj:
+            audios_data.append(audio_obj)
         raw_text = raw_text.replace(tag, voice_desc)
 
     # 8. Images & GIF / Sticker Detection [CQ:image,...]
@@ -1636,12 +1710,20 @@ def parse_incoming_cq_content(raw_text: str, sender_id: int = 0):
         raw_text = raw_text.replace(tag, label)
 
     clean_text = re.sub(r'\[CQ:[^\]]+\]', '', raw_text).strip()
-    return clean_text, images_b64, has_voice
+    return clean_text, images_b64, audios_data, has_voice
 
 def sanitize_reply(text: str) -> str:
-    cleaned = re.sub(r'\*[^*]+\*', '', text)
-    cleaned = re.sub(r'（[^）]+）', '', cleaned)
-    cleaned = re.sub(r'\([^)]+\)', '', cleaned)
+    # 1. Convert markdown bold **word** -> word (raw text output)
+    cleaned = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    # 2. Strip markdown headers (# Header -> Header)
+    cleaned = re.sub(r'^[ \t]*#{1,6}[ \t]+', '', cleaned, flags=re.MULTILINE)
+    # 3. Strip stage actions *action* (up to 20 chars)
+    cleaned = re.sub(r'\*[^*]{1,20}\*', '', cleaned)
+    # 4. Strip stray asterisks
+    cleaned = cleaned.replace('**', '').replace('*', '')
+    # 5. Strip Chinese/English stage parentheses (e.g. （低头脸红）)
+    cleaned = re.sub(r'（[^\d）]{1,20}）', '', cleaned)
+    cleaned = re.sub(r'\([^\d)]{1,20}\)', '', cleaned)
     cleaned = cleaned.strip()
 
     # Strip any accidental single numbered list prefix (e.g. '1. ', '1、', '1: ')
@@ -1937,25 +2019,7 @@ def execute_action_tags(reply_text: str):
     for mem_content in mem_matches:
         update_memory_realtime(mem_content)
 
-    # 7. Custom Picture & Meme Dispatch (Supports [PICTURE: tag], [IMAGE: tag], [发图: 关键词], [发贴图: 关键词], [发照片: 关键词])
-    pic_matches = re.findall(r'\[(?:PICTURE|picture|IMAGE|image|发图|发贴图|发照片):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
-    for p_query in pic_matches:
-        img_path = search_picture_database(p_query)
-        if img_path and os.path.exists(img_path):
-            try:
-                with open(img_path, "rb") as imf:
-                    b64_im = base64.b64encode(imf.read()).decode("utf-8")
-                call_onebot_api("send_private_msg", {
-                    "user_id": config["master_qq"],
-                    "message": f"[CQ:image,file=base64://{b64_im}]"
-                })
-                logging.info(f"Dispatched custom picture/sticker from library: {os.path.basename(img_path)} (matched: '{p_query}')")
-            except Exception as pe:
-                logging.error(f"Failed to encode/send custom picture: {pe}")
-        else:
-            logging.warning(f"Custom picture/sticker not found in library for query: '{p_query}'")
-
-    # 8. Agent-managed Sticker/Picture Tagging & Saving
+    # 7. Agent-managed Sticker/Picture Tagging & Saving (Executed BEFORE sending so newly saved pictures can be immediately dispatched)
     # (Supports [收藏表情: 标签: 描述], [保存表情: 标签: 描述], [收藏图片: 标签: 描述], [SAVE_STICKER: tags: desc])
     save_matches = re.findall(r'\[(?:收藏表情|保存表情|添加表情|收藏图片|保存图片|SAVE_STICKER|save_sticker):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
     for s_info in save_matches:
@@ -1978,7 +2042,7 @@ def execute_action_tags(reply_text: str):
         else:
             logging.warning(f"Agent requested to save sticker ({tags}), but no image was found in recent conversation context.")
 
-    # 9. Agent-managed Picture DB Modification & Deletion
+    # 8. Agent-managed Picture DB Modification & Deletion
     # [修改图片: 目标: 新标签: 新描述] / [修改表情: 目标: 新标签: 新描述] / [更新图片: 目标: 新标签: 新描述]
     modify_matches = re.findall(r'\[(?:修改图片|修改表情|更新图片|更新表情|MODIFY_PICTURE|modify_picture):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
     for m_info in modify_matches:
@@ -2002,6 +2066,24 @@ def execute_action_tags(reply_text: str):
         if d_target:
             res = delete_picture_from_database(d_target)
             logging.info(f"Inline delete picture: {res}")
+
+    # 9. Custom Picture & Meme Dispatch (Supports [PICTURE: tag], [IMAGE: tag], [发图: 关键词], [发贴图: 关键词], [发照片: 关键词])
+    pic_matches = re.findall(r'\[(?:PICTURE|picture|IMAGE|image|发图|发贴图|发照片):\s*([^\]]+)\]', reply_text, re.IGNORECASE)
+    for p_query in pic_matches:
+        img_path = search_picture_database(p_query)
+        if img_path and os.path.exists(img_path):
+            try:
+                with open(img_path, "rb") as imf:
+                    b64_im = base64.b64encode(imf.read()).decode("utf-8")
+                call_onebot_api("send_private_msg", {
+                    "user_id": config["master_qq"],
+                    "message": f"[CQ:image,file=base64://{b64_im}]"
+                })
+                logging.info(f"Dispatched custom picture/sticker from library: {os.path.basename(img_path)} (matched: '{p_query}')")
+            except Exception as pe:
+                logging.error(f"Failed to encode/send custom picture: {pe}")
+        else:
+            logging.warning(f"Custom picture/sticker not found in library for query: '{p_query}'")
 
 def clean_tags(reply_text: str) -> str:
     text = re.sub(r'\[(?:发贴图|Send Sticker|Sticker|sticker):[^\]]+\]', '', reply_text, flags=re.IGNORECASE)
@@ -2079,7 +2161,7 @@ def record_chat_turn(user_content: str, assistant_reply: str, has_image: bool = 
     if len(conversation_history) >= config.get("compact_threshold", 30):
         threading.Thread(target=trigger_auto_compact, daemon=True).start()
 
-def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
+def query_llm(user_prompt: str, images_b64: list, all_audios: list = None, gen_id: int = 0) -> str:
     load_config()
     system_prompt = load_system_prompt()
     lang = config.get("language", "zh").lower()
@@ -2105,15 +2187,23 @@ def query_llm(user_prompt: str, images_b64: list, gen_id: int = 0) -> str:
             if isinstance(turn, dict) and "role" in turn and "content" in turn:
                 messages.append({"role": turn["role"], "content": turn["content"]})
 
-    if images_b64:
+    if images_b64 or all_audios:
         content_items = []
-        default_caption = "(The user sent an image)" if lang == "en" else "（对方发送了一张图片）"
+        default_caption = "(The user sent a message)" if lang == "en" else "（对方发送了消息）"
         caption = user_prompt if user_prompt else default_caption
         content_items.append({"type": "text", "text": caption})
-        for b64 in images_b64:
+        for b64 in (images_b64 or []):
             content_items.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+            })
+        for aud in (all_audios or []):
+            content_items.append({
+                "type": "input_audio",
+                "input_audio": {
+                    "data": aud["data"],
+                    "format": aud.get("format", "mp3")
+                }
             })
         messages.append({"role": "user", "content": content_items})
     else:
@@ -2322,6 +2412,7 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
 
         lang = config.get("language", "zh").lower()
         all_images = []
+        all_audios = []
         lines_for_llm = []
         lines_for_history = []
 
@@ -2331,6 +2422,9 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
             imgs = item.get("images", [])
             if imgs:
                 all_images.extend(imgs)
+            auds = item.get("audios", [])
+            if auds:
+                all_audios.extend(auds)
 
             has_img = bool(imgs)
             img_tag_prompt = "[Sent an Image]" if lang == "en" else "[发送了图片]"
@@ -2346,7 +2440,7 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
                 lines_for_llm.append(img_tag_prompt)
                 lines_for_history.append(img_tag_hist)
 
-        if not lines_for_llm and not all_images:
+        if not lines_for_llm and not all_images and not all_audios:
             with batch_lock:
                 if gen_id == current_generation_id:
                     in_flight_messages.clear()
@@ -2378,7 +2472,7 @@ def _worker_generation_thread(batch_to_process: list, gen_id: int):
         now_str = datetime.datetime.now().strftime("%H:%M:%S")
         logging.info(f"User [{now_str}] (Batch of {len(batch_to_process)}): {history_record_text[:120]}")
 
-        reply = query_llm(user_prompt_for_llm, all_images, gen_id=gen_id)
+        reply = query_llm(user_prompt_for_llm, all_images, all_audios=all_audios, gen_id=gen_id)
         if not reply:
             with batch_lock:
                 if gen_id == current_generation_id:
@@ -2457,7 +2551,7 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
     if not is_self_chat and sender_id != config["master_qq"]:
         return
 
-    clean_text, images_b64, has_voice = parse_incoming_cq_content(raw_text, sender_id=sender_id)
+    clean_text, images_b64, audios_data, has_voice = parse_incoming_cq_content(raw_text, sender_id=sender_id)
     now_str = datetime.datetime.now().strftime("%H:%M:%S")
     logging.info(f"Incoming message [{now_str}] (MsgID: {msg_id}) from {sender_id}: {clean_text[:120]}")
 
@@ -2472,6 +2566,7 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
             "msg_id": msg_id,
             "text": clean_text,
             "images": images_b64,
+            "audios": audios_data,
             "time": time.time()
         })
 
@@ -2656,16 +2751,27 @@ def main():
             if any(h in api for h in ["127.0.0.1", "localhost", "0.0.0.0"]):
                 res = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
                 if "napcat" in res.stdout.split():
-                    logging.info("[*] Stopping local NapCat Docker container...")
+                    try:
+                        logging.info("[*] Stopping local NapCat Docker container...")
+                    except Exception:
+                        print("[*] Stopping local NapCat Docker container...", flush=True)
                     subprocess.run(["docker", "stop", "napcat"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
-                    logging.info("[+] NapCat Docker container stopped.")
+                    try:
+                        logging.info("[+] NapCat Docker container stopped.")
+                    except Exception:
+                        print("[+] NapCat Docker container stopped.", flush=True)
         except Exception:
             pass
 
     atexit.register(stop_docker_napcat_if_local)
 
     def handle_signal(signum, frame):
-        logging.info("Exiting cleanly...")
+        # Ignore repeated signals to prevent reentrant handler execution
+        signal.signal(signum, signal.SIG_IGN)
+        try:
+            logging.info("Exiting cleanly...")
+        except Exception:
+            print("Exiting cleanly...", flush=True)
         stop_docker_napcat_if_local()
         sys.exit(0)
 
@@ -2676,7 +2782,10 @@ def main():
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logging.info("Daemon stopped.")
+        try:
+            logging.info("Daemon stopped.")
+        except Exception:
+            print("Daemon stopped.", flush=True)
         stop_docker_napcat_if_local()
 
 if __name__ == "__main__":
