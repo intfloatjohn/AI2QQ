@@ -34,15 +34,13 @@ fi
 # 2. Python Environment Setup
 echo ""
 echo "=== [1/4] Setting up Python Environment & Dependencies ==="
-if [ ! -d "venv" ]; then
-    echo "[*] Creating Python virtual environment (venv)..."
-    python3 -m venv venv
-fi
+source "$SCRIPT_DIR/ensure_venv.sh"
+ensure_venv "$SCRIPT_DIR"
 
 source venv/bin/activate
 echo "[*] Installing / upgrading Python dependencies..."
-pip install --upgrade pip
-pip install -r requirements.txt
+"$VENV_PY" -m pip install --upgrade pip
+"$VENV_PY" -m pip install -r requirements.txt
 
 # 3. Auto-download / Pre-cache TTS Voice Engine
 echo ""

@@ -286,6 +286,8 @@ chmod +x setup.sh start.sh
 ./start.sh    # Daily startup and auto-reconnect daemon
 ```
 
+**Moving to another computer or folder**: a copied `venv/` can't be reused, because it has the old paths and Python version built in. You don't need to copy it: when the scripts find a `venv/` from another machine, folder or Python version, they delete and rebuild it, so the `externally-managed-environment` error no longer happens. Dependencies are only ever installed into `venv/`, never into the system Python.
+
 ### Safe defaults
 - The OneBot HTTP API (port 3000) has no token, so the launcher makes it listen on `127.0.0.1` only. Older configs set to `0.0.0.0` are switched back automatically, as long as `onebot_http_api` points at this machine. If NapCat's config file is owned by root and can't be changed, the launcher prints what to fix with sudo.
 - Newly created NapCat containers get a random WebUI token instead of the public default `napcat`.

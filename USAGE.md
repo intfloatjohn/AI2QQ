@@ -286,6 +286,8 @@ chmod +x setup.sh start.sh
 ./start.sh    # 日常运行与守护
 ```
 
+**搬到另一台电脑或另一个文件夹时**：`venv/` 不能直接复制过去用（里面写死了原来的路径和 Python 版本）。不复制也没关系，脚本发现 `venv/` 来自别的机器、别的文件夹或别的 Python 版本时，会自动删除并重建，不会再出现 `externally-managed-environment` 错误。所有依赖只装进 `venv/`，不会碰系统 Python。
+
 ### 安全默认设置
 - OneBot HTTP 接口（端口 3000）没有 token，所以启动脚本会让它只监听 `127.0.0.1`；以前配置成 `0.0.0.0` 的也会自动改回来（只要 `onebot_http_api` 指向本机）。如果 NapCat 的配置文件属于 root、脚本改不了，会打印提示，按提示用 sudo 改一下即可。
 - 新建的 NapCat 容器会生成随机的 WebUI token，不再使用公开的默认值 `napcat`。

@@ -522,22 +522,21 @@ for line in sys.stdin:
 fi
 
 # 3. Setup / Activate Python Environment
-if [ -d "venv" ]; then
-    source venv/bin/activate
-    pip install -q -r requirements.txt || true
-else
-    echo "[*] Creating Python virtual environment and installing dependencies..."
-    python3 -m venv venv
-    source venv/bin/activate
-    pip install --upgrade pip
-    pip install -r requirements.txt
+source "$SCRIPT_DIR/ensure_venv.sh"
+if ! ensure_venv "$SCRIPT_DIR"; then
+    echo "[x] Python environment is not ready; run ./setup.sh first."
+    exit 1
+fi
+source venv/bin/activate
+if ! "$VENV_PY" -m pip install -q -r requirements.txt; then
+    echo "[!] Could not install/update Python dependencies; trying to start anyway."
 fi
 
 # 4. Launch Autonomous Agent Daemon
 echo "=================================================================="
 echo "      Starting QQ AI Companion Daemon...                          "
 echo "=================================================================="
-python3 autonomous_agent.py &
+"$VENV_PY" autonomous_agent.py &
 AGENT_PID=$!
 wait $AGENT_PID 2>/dev/null || true
 AGENT_PID=""

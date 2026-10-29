@@ -9,12 +9,11 @@ echo "=== [2/3] Setting up Python venv ==="
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-if [ ! -d "venv" ]; then
-    python3 -m venv venv
-fi
+source "$SCRIPT_DIR/ensure_venv.sh"
+ensure_venv "$SCRIPT_DIR"
 source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+"$VENV_PY" -m pip install --upgrade pip
+"$VENV_PY" -m pip install -r requirements.txt
 
 echo "=== [3/3] Ready! ==="
 echo "Run: ./start_agent.sh"
