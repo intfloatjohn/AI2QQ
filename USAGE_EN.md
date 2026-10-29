@@ -305,6 +305,7 @@ For Windows users, no manual terminal commands are required:
 2. **Daily Startup**:
    * Configure `config.json` with your API Key and QQ numbers.
    * Double-click **`start.bat`** (or `start_agent.bat`) to launch the AI companion.
+3. **Security**: `setup_windows.bat` and `start.bat` run `secure_napcat.py`, which makes OneBot servers without a token (ports 3000/3001) listen on `127.0.0.1` only. Restart NapCat once for the change to take effect; `start.bat` tells you when (usually the first run after QR login).
 
 ---
 

@@ -304,6 +304,7 @@ chmod +x setup.sh start.sh
    * 提示安装 NapCat 时，输入 `1` 即可全自动下载并解压官方最新版 NapCatQQ 到 `NapCat/` 文件夹。
 2. **日常启动**：
    * 在 `config.json` 中配置好 API Key 和 QQ 号后，双击 **`start.bat`**（或 `start_agent.bat`）即可一键启动 AI 伴侣。
+3. **安全**：`setup_windows.bat` 和 `start.bat` 每次都会运行 `secure_napcat.py`，把没有 token 的 OneBot 接口（端口 3000/3001）改为只监听 `127.0.0.1`。修改后需要重启一次 NapCat 才生效（扫码登录后第一次运行 `start.bat` 时会提示）。
 
 ---
 

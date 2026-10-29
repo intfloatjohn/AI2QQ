@@ -13,6 +13,9 @@ if exist "venv\Scripts\activate.bat" (
     call venv\Scripts\activate.bat
 )
 
+REM Keep NapCat's OneBot API (no token) reachable from this computer only
+python secure_napcat.py
+
 python autonomous_agent.py
 
 if %errorlevel% neq 0 (

@@ -79,6 +79,10 @@ if "%napcat_choice%"=="2" (
 )
 
 echo.
+REM Keep NapCat's OneBot API (no token) reachable from this computer only
+python secure_napcat.py
+
+echo.
 echo =========================================================
 echo Setup completed! Starting QQ AI Companion...
 echo (Press Ctrl+C in this window to stop the agent)
