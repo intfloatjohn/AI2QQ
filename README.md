@@ -133,7 +133,7 @@ sudo systemctl enable --now qq-companion
 
 ## 📖 Documentation
 
-* [Full User Guide (USAGE.md)](USAGE.md): Learn how to customize persona files, tune auto-compact memory, adjust log levels, and add custom stickers.
+* [User Guide (English)](USAGE_EN.md) / [用户使用手册 (中文)](USAGE.md): Detailed architectural guide covering persona customization, auto-compact memory, multimodal audio, autonomous visual library, multi-bubble typing, and MCP integration.
 * [Stickers Guide (stickers/STICKERS_GUIDE.md)](stickers/STICKERS_GUIDE.md): How to manage image sticker packs.
 
 ---
