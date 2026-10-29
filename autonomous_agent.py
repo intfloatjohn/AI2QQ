@@ -702,11 +702,11 @@ def sanitize_display_name(name, max_len: int = 24) -> str:
         n = n[:max_len] + "…"
     return n or L("未知", "unknown")
 
-def redact_master_qq(text: str) -> str:
+def redact_master_qq(text: str, placeholder: str = None) -> str:
     """Removes the Master's QQ number from text that will be shown in a group context."""
     mq = str(to_int(config.get("master_qq"), 0))
     if len(mq) >= 5 and text:
-        return text.replace(mq, L("(已隐藏)", "(hidden)"))
+        return text.replace(mq, placeholder or L("(已隐藏)", "(hidden)"))
     return text
 
 def group_speaker_label(uid, name: str) -> str:
@@ -2292,12 +2292,12 @@ def parse_incoming_cq_content(raw_text: str, sender_id: int, session: "ChatSessi
 
 _ECHOED_LABEL_RE = re.compile(r'【(?:主人✔|Master✔|群友 QQ:[^】]*|Member QQ:[^】]*)】')
 
-def sanitize_reply(text: str, session: "ChatSession" = None) -> str:
+def sanitize_reply(text: str, session: "ChatSession" = None, ctx: dict = None) -> str:
     # 0. Never pass raw CQ codes from the model to QQ (e.g. [CQ:at,qq=all] or a file:// image)
     text = _CQ_CODE_RE.sub('', text or "")
-    if session is not None and session.is_group:
+    in_group = session is not None and session.is_group
+    if in_group:
         text = _ECHOED_LABEL_RE.sub('', text)
-        text = redact_master_qq(text)
     # 1. Convert markdown bold **word** -> word (raw text output)
     cleaned = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
     # 2. Strip markdown headers (# Header -> Header)
@@ -2318,7 +2318,12 @@ def sanitize_reply(text: str, session: "ChatSession" = None) -> str:
     if lang == "zh" and re.search(r'[一-鿿]', cleaned):
         cleaned = re.sub(r'nya~', '喵~', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'nya', '喵', cleaned, flags=re.IGNORECASE)
-    
+
+    # Last step, so the placeholder can't be mistaken for a "(stage direction)" and deleted.
+    # When the request came only from the Master, the Master's own number may be repeated.
+    if in_group and not (ctx or {}).get("master_only"):
+        cleaned = redact_master_qq(cleaned, placeholder=L("[主人QQ号已隐藏]", "[Master's QQ number hidden]"))
+
     return cleaned.strip()
 
 STICKER_ALIASES = {
@@ -3208,7 +3213,7 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
             continue
 
         # Final conversational response
-        reply_sanitized = sanitize_reply(raw_reply, session)
+        reply_sanitized = sanitize_reply(raw_reply, session, ctx)
         if reply_sanitized:
             return reply_sanitized
 
@@ -3419,6 +3424,23 @@ def build_group_turn(session: ChatSession, batch: list) -> tuple:
                     who = group_speaker_label(att["uid"], att.get("name", ""))
                     log_notes.append(L(f"{who}发的表情包已存入图库，ID: {att['pic_id']}",
                                        f"Sticker from {who} saved to the library as {att['pic_id']}"))
+    for att in final:
+        if not att.get("is_sticker"):
+            who = group_speaker_label(att["uid"], att.get("name", ""))
+            log_notes.append(L(f"已查看{who}发的图片", f"Viewed a picture from {who}"))
+    for it in items:
+        who = group_speaker_label(it["uid"], it["name"])
+        if it.get("audios"):
+            log_notes.append(L(f"已收听{who}的语音（音频直接交给了模型）", f"Listened to a voice message from {who} (audio given to the model)"))
+        elif "(已转文字)" in (it.get("text") or ""):
+            log_notes.append(L(f"{who}的语音内容：{it['text'][:300]}", f"Voice message from {who}: {it['text'][:300]}"))
+    for a in opened:
+        if a["opened"][2]:
+            who = group_speaker_label(a["uid"], a["name"])
+            log_notes.append(L(f"已收听{who}的语音（音频直接交给了模型）", f"Listened to a voice message from {who} (audio given to the model)"))
+        elif "(已转文字)" in (a["opened"][0] or ""):
+            who = group_speaker_label(a["uid"], a["name"])
+            log_notes.append(L(f"{who}的语音内容：{a['opened'][0][:300]}", f"Voice message from {who}: {a['opened'][0][:300]}"))
     if final:
         session.latest_image_bytes = final[0]["raw"]
         session.latest_image_is_sticker = bool(final[0].get("is_sticker"))
