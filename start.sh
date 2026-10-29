@@ -41,8 +41,11 @@ cleanup() {
     echo "=================================================================="
 
     # Terminate background log follower if running
-    if [ -n "$LOG_PID" ] && kill -0 "$LOG_PID" 2>/dev/null; then
-        kill "$LOG_PID" 2>/dev/null || true
+    if [ -n "$LOG_PID" ]; then
+        kill -TERM "$LOG_PID" 2>/dev/null || true
+        pkill -P "$LOG_PID" 2>/dev/null || true
+        wait "$LOG_PID" 2>/dev/null || true
+        LOG_PID=""
     fi
 
     # Terminate background agent process if running
@@ -257,7 +260,7 @@ else
         }
 
         # Pre-ensure directories and initial HTTP 3000 template
-        sudo mkdir -p /opt/napcat/config /opt/napcat/qq 2>/dev/null || mkdir -p "$HOME/.napcat/config" "$HOME/.napcat/qq" 2>/dev/null || true
+        sudo -n mkdir -p /opt/napcat/config /opt/napcat/qq 2>/dev/null || mkdir -p "$HOME/.napcat/config" "$HOME/.napcat/qq" 2>/dev/null || true
         auto_enable_napcat_http >/dev/null 2>&1 || true
 
         # Check existing container
@@ -319,25 +322,110 @@ else
         if ! check_onebot_online; then
             PUBLIC_IP=$(curl -s --connect-timeout 2 http://ifconfig.me 2>/dev/null || curl -s --connect-timeout 2 http://api.ipify.org 2>/dev/null || echo "127.0.0.1")
 
+            # Extract real WebUI token from config if available, fallback to napcat
+            WEBUI_TOKEN_VAL=$(python3 -c "
+import json, os
+token = 'napcat'
+for p in ['/opt/napcat/config/webui.json', os.path.expanduser('~/.napcat/config/webui.json')]:
+    if os.path.exists(p):
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                t = json.load(f).get('token')
+                if t:
+                    token = str(t)
+                    break
+        except Exception:
+            pass
+print(token)
+" 2>/dev/null || echo "napcat")
+
             echo "=================================================================="
             echo " [!] NapCat is waiting for Mobile QQ QR code login!"
             echo "------------------------------------------------------------------"
             echo " WebUI Dashboard : http://${PUBLIC_IP}:6099/webui"
             echo " Local Dashboard : http://127.0.0.1:6099/webui"
-            echo " WebUI Token     : napcat"
-            echo " Direct URL      : http://${PUBLIC_IP}:6099/webui?token=napcat"
+            echo " WebUI Token     : ${WEBUI_TOKEN_VAL}"
+            echo " Direct URL      : http://${PUBLIC_IP}:6099/webui?token=${WEBUI_TOKEN_VAL}"
             echo "------------------------------------------------------------------"
             echo " * If WebUI is unreachable on Cloud VPS (AliCloud/Tencent/AWS):"
             echo "   1) Allow port 6099 in Cloud Security Group (安全组入方向放行 6099)"
             echo "   2) Or use SSH Tunnel: ssh -L 6099:127.0.0.1:6099 root@${PUBLIC_IP}"
             echo "=================================================================="
             echo ""
-            echo "[*] Streaming NapCat console logs & QR code below:"
-            echo "    (Please scan with Mobile QQ. Script will auto-proceed once logged in!)"
+            echo "[*] Displaying latest QR code below (Scan with Mobile QQ):"
             echo "------------------------------------------------------------------"
 
-            # Stream docker logs in background so ASCII QR code renders directly in terminal
-            $DOCKER_CMD logs -f napcat &
+            # 1. Immediate clean render of current QR code (filters out hex spam & log flood)
+            $DOCKER_CMD logs --tail 500 napcat 2>&1 | python3 -c "
+import sys, re
+lines = sys.stdin.readlines()
+def is_hex(line):
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
+    return bool(re.match(r'^[0-9a-fA-F]{32,}$', clean))
+def is_noise(line):
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
+    if not clean or is_hex(line): return True
+    if 'ErrCode: 3' in clean: return True
+    return any(n in clean for n in [
+        'dbus/', 'gl_surface', 'gl_context', 'gpu_info', 'viz_main', 'gpu_process',
+        'network_service_instance', 'MMKV', 'nt_mmkv', 'MemoryFile', 'PacketHandler',
+        'Napi2NativeLoader', 'write and writev hooks', 'resourcesPath:', 'usermod:',
+        'not mini app', 'major.node', '[ServerTime]', '时间同步完成', '接收 <-', '发送 ->'
+    ])
+def is_qr(line):
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
+    return any(c in clean for c in ('▄', '█', '▀'))
+
+filtered = []
+for l in lines:
+    if not is_noise(l):
+        l_clean = re.sub(r'[0-9a-fA-F]{32,}', '', l)
+        if l_clean.strip(): filtered.append(l_clean)
+last_qr_idx = -1
+for i, l in enumerate(filtered):
+    if '请扫描下面的二维码' in l or (is_qr(l) and (i == 0 or not is_qr(filtered[i-1]))):
+        last_qr_idx = i
+if last_qr_idx != -1:
+    to_print = filtered[last_qr_idx:]
+else:
+    to_print = filtered[-25:] if filtered else []
+print(''.join(to_print).strip())
+" 2>/dev/null || true
+
+            # 2. Live event follower: streams only new QR refreshes or login confirmation
+            $DOCKER_CMD logs -f --tail 0 napcat 2>&1 | python3 -u -c '
+import sys, re
+def is_hex(line):
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+    return bool(re.match(r"^[0-9a-fA-F]{32,}$", clean))
+def is_noise(line):
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+    if not clean or is_hex(line): return True
+    if "ErrCode: 3" in clean: return True
+    return any(n in clean for n in [
+        "dbus/", "gl_surface", "gl_context", "gpu_info", "viz_main", "gpu_process",
+        "network_service_instance", "MMKV", "nt_mmkv", "MemoryFile", "PacketHandler",
+        "Napi2NativeLoader", "write and writev hooks", "resourcesPath:", "usermod:",
+        "not mini app", "major.node", "[ServerTime]", "时间同步完成", "接收 <-", "发送 ->"
+    ])
+def is_useful(line):
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+    if is_noise(line): return False
+    if any(c in clean for c in ("▄", "█", "▀")): return True
+    whitelist = [
+        "请扫描", "二维码", "qrcode", "txz.qq.com",
+        "webui", "token", "dashboard",
+        "扫码成功", "已扫码", "授权", "登录成功", "login success",
+        "onebot", "网络已连接"
+    ]
+    return any(w in clean.lower() for w in whitelist)
+
+for line in sys.stdin:
+    if is_useful(line):
+        l_clean = re.sub(r"[0-9a-fA-F]{32,}", "", line)
+        if l_clean.strip():
+            print(l_clean, end="", flush=True)
+' &
             LOG_PID=$!
 
             RESTARTED_FOR_HTTP=0
@@ -357,9 +445,12 @@ else
                 fi
             done
 
-            kill $LOG_PID 2>/dev/null || true
-            wait $LOG_PID 2>/dev/null || true
-            LOG_PID=""
+            if [ -n "$LOG_PID" ]; then
+                kill -TERM "$LOG_PID" 2>/dev/null || true
+                pkill -P "$LOG_PID" 2>/dev/null || true
+                wait "$LOG_PID" 2>/dev/null || true
+                LOG_PID=""
+            fi
 
             echo ""
             echo "=================================================================="
