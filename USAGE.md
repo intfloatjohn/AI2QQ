@@ -441,7 +441,7 @@ chmod +x setup.sh start.sh
 | `group_master_notify_max_per_hour` | `3` | 每小时主动私聊主人的上限（所有群合计）；`0` = 关闭 |
 | `group_glance_enabled` | `true` | 没被叫到时也定期看一眼群聊 |
 | `group_glance_interval_sec` / `group_glance_min_new_messages` / `group_glance_max_per_hour` | `600` / `5` / `4` | 旁观间隔、至少多少条新消息、每群每小时上限 |
-| `group_max_tokens` | `800` | 群聊回复的最大 token 数 |
+| `group_max_tokens` | `800` | 群聊回复的最大 token 数。会“思考”的模型（如 Gemini）的思考也算在里面；用完了回复会是空的，程序会自动用 4 倍额度重试一次并记 WARNING，经常出现就调大这一项或设置 `thinking_level` |
 | `group_max_bubbles` | `3` | 群聊回复最多拆成几条气泡 |
 | `group_memory_max_chars` | `3000` | 每个群（和每位好友）自己记忆的长度，超出时合并重复条目（先备份） |
 | `memory_mode` | `"shared"` | `shared`：群聊和好友私聊共用公共记忆；`separate`：每个聊天各自一份 |

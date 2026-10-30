@@ -442,7 +442,7 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 | `group_master_notify_max_per_hour` | `3` | Private messages to the Master per hour, all groups together; `0` = off |
 | `group_glance_enabled` | `true` | Skim group chat now and then even when not called |
 | `group_glance_interval_sec` / `group_glance_min_new_messages` / `group_glance_max_per_hour` | `600` / `5` / `4` | Glance interval, minimum new messages, per-group hourly cap |
-| `group_max_tokens` | `800` | Max tokens for a group reply |
+| `group_max_tokens` | `800` | Max tokens for a group reply. For thinking models (e.g. Gemini) the thinking counts too; if it uses everything the answer is empty, so the bot retries once with 4x the budget and logs a WARNING. If that happens often, raise this or set `thinking_level` |
 | `group_max_bubbles` | `3` | Max bubbles per group reply |
 | `group_memory_max_chars` | `3000` | Size of each group's (and each friend's) own memory; past it, duplicates are merged (backup first) |
 | `memory_mode` | `"shared"` | `shared`: groups and friend chats share one memory; `separate`: one per chat |

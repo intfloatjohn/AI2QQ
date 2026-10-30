@@ -4252,6 +4252,8 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
     max_tool_turns = 5
     total_tool_calls = 0
     web_search_count = 0
+    cutoff_retried = False
+    last_finish, last_raw = None, ""
 
     # ReAct tool-execution loop (up to 5 turns)
     for iteration in range(max_tool_turns):
@@ -4362,6 +4364,20 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
         message_obj = choice.get("message", {})
         raw_reply = normalize_model_tags(message_obj.get("content", "") or "")
         tool_calls = message_obj.get("tool_calls", [])
+        last_finish, last_raw = choice.get("finish_reason"), raw_reply
+
+        # Thinking models can spend the whole reply budget on thinking and return nothing.
+        # Retry once with a bigger budget instead of going silent.
+        if not raw_reply.strip() and not tool_calls and last_finish == "length" and not cutoff_retried:
+            cutoff_retried = True
+            usage = data.get("usage") or {}
+            thought = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            old_max = max_tokens_val
+            max_tokens_val = min(max(old_max * 4, 2000), 8000)
+            logging.warning(f"[{session.key}] The model's answer was empty: it used up max_tokens={old_max}"
+                            f"{f' ({thought} on thinking)' if thought else ''}. Retrying once with max_tokens={max_tokens_val}. "
+                            f"Raise {'group_max_tokens' if in_group else 'max_tokens'} or set thinking_level to avoid this.")
+            continue
 
         # Check for inline command tags in raw_reply if tool_calls not used
         inline_search = re.search(r'\[(?:搜索|Search|search|web_search):\s*([^\]]+)\]', raw_reply, re.IGNORECASE)
@@ -4482,6 +4498,8 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
         reply_sanitized = sanitize_reply(raw_reply, session, ctx)
         if reply_sanitized:
             return reply_sanitized
+        logging.warning(f"[{session.key}] The model gave no usable reply (finish_reason={last_finish}, "
+                        f"raw={raw_reply[:120]!r}); {'staying silent in the group' if in_group else 'sending the fallback line'}.")
 
         if in_group:
             return ""
