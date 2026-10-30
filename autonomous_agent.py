@@ -696,6 +696,12 @@ def get_tools_for_session(session: "ChatSession", ctx: dict = None) -> list:
     tools.append(REVIEW_MEDIA_TOOL)
     if not is_self_chat_mode():
         tools.append(MESSAGE_MASTER_TOOL)
+
+    # Avoid meaningless tool calls on turn 1 when memory archive is empty
+    has_memory_content = bool(session.long_term_memory and session.long_term_memory.strip() and not session.long_term_memory.strip().endswith("】"))
+    if not has_memory_content and len(session.history) <= 1:
+        tools = [t for t in tools if t["function"]["name"] != "read_memory"]
+
     return tools
 
 def load_system_prompt() -> str:
@@ -806,7 +812,9 @@ def _trim_memory_text(text: str, max_chars: int) -> str:
 
 def update_memory_realtime(session: ChatSession, content: str, ctx: dict = None) -> str:
     """Appends a fact to the session's own memory file immediately.
-    Group memories get a provenance tag computed by code from the real sender IDs of the batch."""
+    Group memories get a provenance tag computed by code from the real sender IDs of the batch.
+    Performs semantic deduplication to prevent repetitive facts or duplicate dates across turns."""
+    import difflib
     lang = config.get("language", "zh").lower()
     clean_content = content.strip()
     if session.is_group:
@@ -814,11 +822,16 @@ def update_memory_realtime(session: ChatSession, content: str, ctx: dict = None)
     if not clean_content:
         return "Memory content is empty." if lang == "en" else "记忆内容为空。"
 
-    stored = clean_content
+    # Strip redundant date/time prefixes model might have included (e.g. "2026-10-30 主人下周三...")
+    clean_fact = re.sub(r'^(?:\[?\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?(?:\s*\d{1,2}:\d{2}(?::\d{2})?)?\]?|\d{1,2}:\d{2})\s*[-:：]?\s*', '', clean_content).strip()
+    if not clean_fact:
+        clean_fact = clean_content
+
+    stored = clean_fact
     if session.is_group:
         prov = (ctx or {}).get("provenance", "")
         if prov:
-            stored = L(f"(来源: {prov}) {clean_content}", f"(source: {prov}) {clean_content}")
+            stored = L(f"(来源: {prov}) {clean_fact}", f"(source: {prov}) {clean_fact}")
 
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     with session.mem_lock:
@@ -829,6 +842,26 @@ def update_memory_realtime(session: ChatSession, content: str, ctx: dict = None)
                     existing = f.read().strip()
             except Exception:
                 existing = ""
+
+        # Semantic & substring deduplication against existing memory entries
+        core_norm = re.sub(r'[\s\W_]+', '', clean_fact).lower()
+        if existing and core_norm:
+            for line in existing.split("\n"):
+                line_clean = re.sub(r'^[-*]\s*\[.*?\]\s*', '', line).strip()
+                line_clean = re.sub(r'\(来源:\s*.*?\)', '', line_clean).strip()
+                line_norm = re.sub(r'[\s\W_]+', '', line_clean).lower()
+                if not line_norm:
+                    continue
+                # Exact or substring match
+                if core_norm == line_norm or (len(core_norm) >= 6 and (core_norm in line_norm or line_norm in core_norm)):
+                    logging.info(f"Skipping duplicate memory [{session.key}]: '{clean_fact}' matches existing line '{line_clean}'")
+                    return L(f"该信息已在记忆库中记录：{clean_fact}", f"Fact already saved in memory: {clean_fact}")
+                # Fuzzy sequence similarity match
+                if len(core_norm) >= 8 and len(line_norm) >= 8:
+                    ratio = difflib.SequenceMatcher(None, core_norm, line_norm).ratio()
+                    if ratio > 0.72:
+                        logging.info(f"Skipping highly similar memory [{session.key}] (sim={ratio:.2f}): '{clean_fact}' vs '{line_clean}'")
+                        return L(f"该信息已在记忆库中记录：{clean_fact}", f"Fact already saved in memory: {clean_fact}")
 
         new_entry = f"- [{now_str}] {stored}"
         if existing:
@@ -846,7 +879,7 @@ def update_memory_realtime(session: ChatSession, content: str, ctx: dict = None)
         session.save_memory()
 
     logging.info(f"Realtime Memory Updated [{session.key}]: {new_entry}")
-    return f"Successfully saved to long-term memory: {clean_content}" if lang == "en" else f"已成功将新信息记入长期记忆：{clean_content}"
+    return f"Successfully saved to long-term memory: {clean_fact}" if lang == "en" else f"已成功将新信息记入长期记忆：{clean_fact}"
 
 def remember(session: ChatSession, content: str, ctx: dict = None) -> str:
     """Writes a memory at most once per generation. (Previously the same [更新记忆] tag was
@@ -964,16 +997,43 @@ def search_chat_history(session: ChatSession, query: str, max_results: int = 8) 
 
 SEARCH_CACHE = {}
 
+def fetch_weather_direct(query: str) -> str:
+    """Extracts city from query and fetches real-time weather data from wttr.in."""
+    try:
+        if not any(k in query.lower() for k in ["天气", "气温", "温度", "预报", "下雨", "weather", "temp"]):
+            return ""
+        city_m = re.search(r'([\u4e00-\u9fa5]{2,8}?)(?:市|区|县)?(?:的)?(?:今天|明天|后天|本周|这周|未来)?(?:天气|气温|温度|预报|下雨|多云|晴天)', query)
+        if not city_m:
+            city_m = re.search(r'([\u4e00-\u9fa5]{2,6})\s*(?:weather|天气)', query, re.IGNORECASE)
+        city = city_m.group(1).strip() if city_m else ""
+        if not city and len(query) <= 6:
+            city = query.replace("天气", "").replace("预报", "").replace("气温", "").replace("温度", "").strip()
+        if not city:
+            return ""
+
+        url_city = urllib.parse.quote(city)
+        fmt = urllib.parse.quote("%l: %C %t (体感 %f), 湿度 %h, 风向 %w")
+        url = f"https://wttr.in/{url_city}?m&format={fmt}&lang=zh"
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.88.0"})
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            text = resp.read().decode("utf-8", errors="ignore").strip()
+        if text and "Unknown location" not in text and not text.startswith("<!DOCTYPE"):
+            return f"【{city} 气象实况数据】: {text}"
+    except Exception as e:
+        logging.debug(f"Direct weather query error: {e}")
+    return ""
+
 def search_bing_cn(query: str, max_results: int = 3) -> list:
-    """Fast, reliable web search via cn.bing.com (fully unblocked in Mainland China)."""
+    """Fast, reliable web search via www.bing.com (fully unblocked in Mainland China)."""
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
         }
-        url = f"https://cn.bing.com/search?q={urllib.parse.quote(query)}"
+        url = f"https://www.bing.com/search?q={urllib.parse.quote(query)}&setlang=zh-hans"
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=4) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             content = resp.read().decode("utf-8", errors="ignore")
 
         results = []
@@ -989,7 +1049,7 @@ def search_bing_cn(query: str, max_results: int = 3) -> list:
                 results.append({"title": html.unescape(title), "body": html.unescape(snippet)})
         return results
     except Exception as e:
-        logging.warning(f"Bing CN search error: {e}")
+        logging.warning(f"Bing search error: {e}")
         return []
 
 def search_baidu_web(query: str, max_results: int = 3) -> list:
@@ -1078,13 +1138,16 @@ def web_search(query: str, max_results: int = 3, gen_id: int = 0, session: "Chat
             lines_list = [f"[{i+1}] {r['title']}\nSnippet: {r['body'][:240]}" for i, r in enumerate(bing_items)]
             results_text = "\n\n".join(lines_list)
 
+    # Prepend real-time weather card if query is weather related
+    weather_card = fetch_weather_direct(clean_q)
+    if weather_card:
+        results_text = f"{weather_card}\n\n{results_text}" if results_text else weather_card
+
     if results_text:
         SEARCH_CACHE[clean_q] = (now, results_text)
         return results_text
 
     return "网络搜索暂时没有获取到相关内容，请直接根据已有知识回答。" if lang == "zh" else "Web search returned no relevant results."
-
-    return f"No relevant search results found for '{clean_q}'." if lang == "en" else f"未能获取到“{clean_q}”的有效搜索结果。"
 
 def trigger_auto_compact(session: ChatSession):
     """Folds older turns of ONE session into that session's own long-term memory."""
@@ -1179,6 +1242,33 @@ def get_llm_url() -> str:
     if any(endpoint in base for endpoint in ["/chat/completions", "/completions", "/messages", "/generate"]):
         return base
     return f"{base.rstrip('/')}/chat/completions"
+
+def model_supports_vision(model_name: str = None) -> bool:
+    """Detects whether the configured model supports vision/image inputs."""
+    cfg_vision = config.get("enable_vision")
+    if cfg_vision is not None:
+        return bool(cfg_vision)
+
+    m = (model_name or config.get("model", "")).lower().strip()
+    # Explicit text-only models that silently drop image payloads on OpenAI-compatible APIs
+    text_only_patterns = [
+        "deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro", "deepseek-pro",
+        "deepseek-r1", "deepseek-v3", "o1-mini", "o3-mini", "o1-preview",
+        "llama-3-", "llama-3.1-", "mistral-", "qwen-turbo", "qwen-plus", "qwen-max"
+    ]
+    if any(p in m for p in text_only_patterns):
+        if not any(v in m for v in ["vl", "vision", "multimodal"]):
+            return False
+
+    # Explicit vision-capable models
+    vision_patterns = [
+        "gemini", "gpt-4o", "gpt-4-turbo", "claude-3", "qwen-vl", "qwen2-vl",
+        "qvq", "glm-4v", "deepseek-flash", "pixtral", "vision", "omni"
+    ]
+    if any(p in m for p in vision_patterns):
+        return True
+
+    return True
 
 def raw_llm_call(prompt: str, max_tokens: int = 800) -> str:
     url = get_llm_url()
@@ -2351,9 +2441,20 @@ def sanitize_reply(text: str, session: "ChatSession" = None, ctx: dict = None) -
     cleaned = re.sub(r'\*[^*]{1,20}\*', '', cleaned)
     # 4. Strip stray asterisks
     cleaned = cleaned.replace('**', '').replace('*', '')
-    # 5. Strip Chinese/English stage parentheses (e.g. （低头脸红）)
-    cleaned = re.sub(r'（[^\d）]{1,20}）', '', cleaned)
-    cleaned = re.sub(r'\([^\d)]{1,20}\)', '', cleaned)
+    # 5. Strip Chinese/English stage actions only (e.g. （低头脸红）), preserving legitimate conversational remarks
+    _STAGE_ACTIONS = (
+        r'低头|脸红|小声|叹气|微笑|眨眼|摇头|点头|歪头|抱胸|叉腰|轻笑|轻咳|抓头|委屈|害羞|'
+        r'生气|撒娇|哭泣|抽泣|愣住|嘀咕|嘟嘴|望天|托腮|扶额|摊手|摆手|轻声|小跑|转身|挥手|'
+        r'跳|倒吸|擦泪|拍手|耸肩|咬唇|白眼|揉眼睛|喘气|吸气|哼|哈欠|发呆|捂脸|冷笑|坏笑|偷笑|笑'
+    )
+    cleaned = re.sub(rf'（(?:[^\d）]{{0,6}}(?:{_STAGE_ACTIONS})[^\d）]{{0,6}})）', '', cleaned)
+    cleaned = re.sub(r'^\s*（[^\d）\n]{1,15}）\s*', '', cleaned)
+    _EN_STAGE_ACTIONS = (
+        r'smiles?|sighs?|winks?|blushes?|chuckles?|giggles?|whispers?|pouts?|nods?|'
+        r'shrugs?|rolls eyes?|yawns?|tilts head|looks down|laughs?|frowns?'
+    )
+    cleaned = re.sub(rf'\((?:[^()\d]{{0,6}}(?:{_EN_STAGE_ACTIONS})[^()\d]{{0,6}})\)', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'^\s*\([^\d)\n]{1,20}\)\s*', '', cleaned)
     cleaned = cleaned.strip()
 
     # Strip any accidental single numbered list prefix (e.g. '1. ', '1、', '1: ')
@@ -3098,12 +3199,27 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
             if isinstance(turn, dict) and "role" in turn and "content" in turn:
                 messages.append({"role": turn["role"], "content": turn["content"]})
 
-    if images_b64 or all_audios:
+    model_name = config.get("model", "deepseek-flash")
+    supports_vision = model_supports_vision(model_name)
+
+    effective_images_b64 = images_b64 if supports_vision else []
+    if images_b64 and not supports_vision:
+        vision_degrade_notice = (
+            f"【系统提示：对方发送了 {len(images_b64)} 张图片/表情包，但当前配置的大模型 ({model_name}) 为纯文本模型，不具备看图视觉能力。请在回复中自然告知对方你当前使用的是纯文本模型，暂时无法查看图片内容。】"
+            if lang == "zh" else
+            f"【System Notice: The user sent {len(images_b64)} image(s), but the current model ({model_name}) is a text-only model without vision capabilities. Please naturally inform the user that you currently cannot view images.】"
+        )
+        if user_prompt:
+            user_prompt = f"{user_prompt}\n\n{vision_degrade_notice}"
+        else:
+            user_prompt = vision_degrade_notice
+
+    if effective_images_b64 or all_audios:
         content_items = []
         default_caption = "(The user sent a message)" if lang == "en" else "（对方发送了消息）"
         caption = user_prompt if user_prompt else default_caption
         content_items.append({"type": "text", "text": caption})
-        for b64 in (images_b64 or []):
+        for b64 in (effective_images_b64 or []):
             content_items.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
@@ -3133,7 +3249,8 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
         max_tokens_val = int(config.get("max_tokens", 1200))
     tools = get_tools_for_session(session, ctx)
     max_tool_turns = 5
-    model_name = config.get("model", "deepseek-flash")
+    total_tool_calls = 0
+    web_search_count = 0
 
     # ReAct tool-execution loop (up to 5 turns)
     for iteration in range(max_tool_turns):
@@ -3244,6 +3361,29 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
                         fn_args = {}
                 except Exception:
                     fn_args = {}
+
+                # Tool quota management: limit web search and total tool calls per turn to prevent runaway token costs
+                if fn_name == "web_search":
+                    web_search_count += 1
+                    if web_search_count > 2:
+                        obs = (
+                            "【系统提示：本轮网络搜索配额已用完，请直接根据已获取到的搜索结果与自身知识进行总结回答。】"
+                            if lang == "zh" else
+                            "【System Notice: Web search limit reached for this turn; please synthesize your answer using the results obtained so far.】"
+                        )
+                        messages.append({"role": "tool", "tool_call_id": call_id, "content": obs})
+                        continue
+
+                total_tool_calls += 1
+                if total_tool_calls > 4:
+                    obs = (
+                        "【系统提示：工具调用次数已达上限，请直接回答用户。】"
+                        if lang == "zh" else
+                        "【System Notice: Tool calling limit reached; please reply directly to the user.】"
+                    )
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": obs})
+                    continue
+
                 logging.info(f"Executing Function Call [{session.key}]: {fn_name}({fn_args})")
                 if not session.is_current(gen_id):
                     return ""
@@ -3604,16 +3744,24 @@ def build_group_turn(session: ChatSession, batch: list) -> tuple:
     return prompt, history_text, [att["b64"] for att in final], all_audios, ctx
 
 def dispatch_text_bubbles(session: ChatSession, clean_text_reply: str, ctx: dict):
-    # Multi-bubble message sending: split by [SEP] delimiter
-    if "[SEP]" in clean_text_reply and config.get("enable_multi_bubble_reply", True):
-        bubbles = [b.strip() for b in clean_text_reply.split("[SEP]") if b.strip()]
-    else:
+    # Multi-bubble message sending: split by [SEP] delimiter, or fall back to double newlines (\n\n)
+    bubbles = []
+    if config.get("enable_multi_bubble_reply", True):
+        if "[SEP]" in clean_text_reply:
+            bubbles = [b.strip() for b in clean_text_reply.split("[SEP]") if b.strip()]
+        elif "\n\n" in clean_text_reply and "```" not in clean_text_reply:
+            # Model used blank lines to segment messages instead of explicit [SEP]
+            cand = [b.strip() for b in re.split(r'\n{2,}', clean_text_reply) if b.strip()]
+            # Only treat as multi-bubble if each part is natural conversational text (not markdown tables or bulleted lists)
+            if 1 < len(cand) <= 5 and not any(c.startswith(("|", "---", "1.", "- ")) for c in cand):
+                bubbles = cand
+
+    if not bubbles:
         bubbles = [clean_text_reply]
 
-    if session.is_group:
-        max_b = max(1, to_int(config.get("group_max_bubbles", 3), 3))
-        if len(bubbles) > max_b:
-            bubbles = bubbles[:max_b - 1] + [" ".join(bubbles[max_b - 1:])]
+    max_b = max(1, to_int(config.get("group_max_bubbles", 3), 3)) if session.is_group else max(1, to_int(config.get("private_max_bubbles", 4), 4))
+    if len(bubbles) > max_b:
+        bubbles = bubbles[:max_b - 1] + ["\n".join(bubbles[max_b - 1:])]
 
     delay_sec = config.get("multi_bubble_delay_sec", 1.2)
     for idx, bubble in enumerate(bubbles):
@@ -4760,6 +4908,7 @@ def main():
     logging.info("      QQ AI Companion Daemon (Bilingual & Multi-Modal Edition)")
     logging.info("=" * 65)
     logging.info(f"[*] Model           : {config.get('model')}")
+    logging.info(f"[*] Model Vision    : {'Enabled (Multimodal)' if model_supports_vision() else 'Disabled (Text-only model; graceful degradation active)'}")
     logging.info(f"[*] Target User QQ  : {config.get('master_qq')}")
     logging.info(f"[*] Language Mode   : {config.get('language')}")
     logging.info(f"[*] Voice Synthesis : {'Available (Edge-TTS)' if EDGE_TTS_AVAILABLE else 'Disabled (edge-tts not installed)'}")
