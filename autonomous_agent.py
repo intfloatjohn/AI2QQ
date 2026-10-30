@@ -3229,10 +3229,14 @@ def execute_action_tags(session: ChatSession, reply_text: str, ctx: dict = None)
                 append_to_full_chat_history(session, "note", L(f"{who}的{kind}（媒体ID: {media_id}）：{entry.get('label')}",
                                                                 f"{kind} from {who} (media ID: {media_id}): {entry.get('label')}"))
         for text in _TELL_MASTER_RE.findall(reply_text)[:1]:
-            notify_master(session, text)
+            if not ctx.get("_told_master"):
+                ctx["_told_master"] = True
+                notify_master(session, text)
     elif session.is_friend:
         for text in _TELL_MASTER_RE.findall(reply_text)[:1]:
-            notify_master(session, text)
+            if not ctx.get("_told_master"):
+                ctx["_told_master"] = True
+                notify_master(session, text)
 
     # 8a. Qzone text tags (same permission checks as the qzone tools)
     if qzone_enabled() and (session.is_untrusted or session.is_master_private):
@@ -3342,6 +3346,9 @@ def execute_tool_call(session: ChatSession, tool_name: str, arguments: dict, gen
         elif tool_name == "message_master":
             if not session.is_untrusted:
                 return denied
+            if ctx.get("_told_master"):
+                return L("这次已经告诉过主人了。", "Already told your Master in this reply.")
+            ctx["_told_master"] = True
             return notify_master(session, arguments.get("text", ""))
         elif tool_name in QZONE_TOOL_NAMES:
             return execute_qzone_tool(session, tool_name, arguments, ctx)
@@ -6002,8 +6009,8 @@ QZONE_GROUP_POST_TOOL = {
 
 # What counts as the Master asking for a post / approving a draft is decided from the Master's
 # OWN words in this turn (ctx["master_words"]), never from what the model claims.
-_QZ_ASK_RE = re.compile(r'发(?:一|个|条|篇|一条|一个|一篇)?(?:说说|动态)|发(?:到|在|个|条)?(?:QQ)?空间|(?:空间|说说)(?:里)?发|'
-                        r'post\b.*\b(?:qzone|qq ?zone)|(?:qzone|qq ?zone).*\bpost', re.IGNORECASE)
+_QZ_ASK_RE = re.compile(r'发(?:一|个|条|篇|一条|一个|一篇)?(?:说说|动态)|发(?:到|在|个|条)?(?:QQ)?空间|'
+                        r'\bpost\b.{0,20}\b(?:to|on)\s+(?:qzone|qq ?zone)', re.IGNORECASE)
 _QZ_APPROVE_RE = re.compile(r'发吧|发布|发出去|发了吧|可以发|可以|同意|确认|没问题|好的|好呀|好啊|^\s*好\s*$|^\s*行\s*$|^\s*嗯+\s*$|'
                             r'\bok\b|\bokay\b|\byes\b|\bsure\b|\bgo ahead\b|\bpost it\b|\bapprove', re.IGNORECASE)
 _QZ_REFUSE_RE = re.compile(r'不要|不用|不发|不行|不可以|不同意|不好|别|算了|取消|等等|等一下|先不|再说|'
@@ -6024,6 +6031,9 @@ def execute_qzone_tool(session: ChatSession, tool_name: str, arguments: dict, ct
         return L("QQ空间功能没有开启。", "Qzone is not enabled.")
     denied = L("权限不足：这个操作只有主人本人才能执行。", "Permission denied: only the Master can do this.")
     if tool_name == "qzone_post":
+        if ctx.get("_qzone_post_done"):
+            return L("这次回复里已经处理过一条说说了。", "A post was already handled in this reply.")
+        ctx["_qzone_post_done"] = True
         text = str(arguments.get("text") or "")
         did = str(arguments.get("draft_id") or "").strip()
         if session.is_master_private:
