@@ -22,6 +22,8 @@ This project is a high-performance, lightweight, 24/7 autonomous QQ AI companion
 13. [Headless Debian / Linux Deployment & Terminal QR Code Login](#13-headless-debian--linux-deployment--terminal-qr-code-login)
 14. [Windows One-Click Setup & Startup](#14-windows-one-click-setup--startup)
 15. [Group Chat](#15-group-chat)
+16. [Qzone (experimental)](#16-qzone-experimental)
+17. [Friend Chat](#17-friend-chat)
 
 ---
 
@@ -258,6 +260,13 @@ python3 mcp-server/onebot_mcp.py
 * `poll_interval_sec`: Polling interval for new messages (recommended: 0.6 ~ 1.0s).
 * `compact_threshold` / `compact_keep_recent`: Turn threshold for long-term memory summarization.
 * Group chat settings (`enable_group_chat`, `group_whitelist`, ...) are described in [Section 15](#15-group-chat).
+* `thinking_level`: how much the model thinks: `""` (default: not set, the provider decides), `none`, `minimal`, `low`, `medium`, `high`. More thinking means slower replies and more tokens.
+* `thinking_level_background`: thinking level for background work (memory, group glances, Qzone); empty = same as `thinking_level`. `low` is recommended: cheaper and faster.
+* `thinking_api`: how the setting is sent; `auto` (default) decides from `base_url` and `model`:
+  - **OpenRouter** (and proxies with model names like `google/gemini-…`) gets `"reasoning": {"effort": "low"}`.
+  - **DeepSeek** (`api.deepseek.com`) only has on/off: `none` turns thinking off, any other level turns it on.
+  - Other OpenAI-compatible APIs get `"reasoning_effort": "low"`.
+  Set `openrouter`, `deepseek` or `openai` if the guess is wrong. If the model refuses a level (some models don't allow thinking to be turned off), `none` falls back to `low` and other levels fall back to not sending the setting; the log says so once.
 * `onebot_access_token`: if NapCat's HTTP server has a token (e.g. NapCat runs on another machine), put the same value here and the bot sends it as `Authorization: Bearer`.
 
 ---
@@ -345,6 +354,7 @@ Other group messages don't trigger a reply; they are only shown to the model as 
 
 **Pictures, stickers, files and forwarded chats**:
 - Pictures in the message that calls the bot, in follow-up messages and in a quoted message are opened for the model.
+- **Quotes**: in private and group chats the model sees which message was quoted, who wrote it and what it said (e.g. `(quoting what you said earlier: "bring an umbrella tomorrow")`). In private chat, pictures in the quoted message are attached too (up to 2). Quotes inside background group messages are shown as well. If the quoted message can't be loaded, the model is told so.
 - From what was posted since the bot's last reply, the most recent `group_context_media` pictures / forwarded chats / files / voice messages are opened (default 2, within 5 minutes). So "@bot what do you think?" can see a picture someone else just posted.
 - At most 4 pictures are attached per reply, with a note telling the model who posted each one.
 - Stickers the bot has looked at are saved to the library automatically, and the model is told their library ID so it can resend one with `[PICTURE: ID]`. Stickers from the Master are shared; other members' stickers stay in that group. Ordinary photos are not saved automatically (use `[SAVE_STICKER: …]` when wanted).
@@ -368,7 +378,7 @@ Other group messages don't trigger a reply; they are only shown to the model as 
 
 - No code path reachable from a group session opens the Master's private files. In a group, `[read_memory]`, `[search_history]` and `[remember]` only act on that group, and `agent.log` (which mixes every chat) is never searched.
 - **Even when the Master speaks in a group, the group-side model gets no private memory**: group replies are public, and the same batch may contain other people's injected text. Ask private things in private chat.
-- Group replies show the Master's QQ number as `[Master's QQ number hidden]`; it is only said out loud when the Master asks (every message in that batch came from the Master).
+- The Master's QQ number is not hidden by default (anyone on QQ can see QQ numbers, and identity is checked by ID, so knowing the number doesn't let anyone pretend to be the Master). To hide it, set `"hide_master_qq": true`: group replies and Qzone then show `[Master's QQ number hidden]`, and the bot only says it when the Master asks (every message in that batch came from the Master).
 - Groups are isolated from each other; group A's memory is invisible in group B.
 - **Memory flows one way**: in private chat, when the Master asks "what happened in the group today?", the companion can use `[group_recall: group ID or keyword]` or the `recall_group_chat` tool.
 - Each group memory entry is tagged with its source, e.g. `(source: QQ:123(Alice))`, written by the program from real QQ IDs. Group memory has a size cap (`group_memory_max_chars`) and is auto-compacted like private memory.
@@ -439,3 +449,83 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 - Group chat stays off in single-account mode (`bot_qq == master_qq`): the Master and the bot share one QQ ID, so they can't be told apart by ID. The log says so.
 - If `bot_qq` in `config.json` is wrong, group chat uses the account NapCat is actually logged in with and logs a warning.
 - The bot must already be a member of each whitelisted group; if a group can't be read, the log warns every 5 minutes.
+
+---
+
+## 16. Qzone (experimental)
+
+The bot can use QQ Zone (QQ空间): read the Master's and friends' posts, comment and like, and now and then write a post of its own. Off by default; turn it on with `"enable_qzone": true` in `config.json`.
+
+> Qzone has no official API. This uses the Qzone website's endpoints with the login cookies NapCat provides. Tencent can change them at any time, and there is some risk of account checks. Use a secondary account and keep the default limits below.
+
+### 16.1 What it does
+- **Reading and commenting**: every 30 minutes it checks the Master's space and 5 friends' spaces in turn. It only looks at new posts from the last 24 hours that were posted after the feature was turned on. The model decides whether to comment, like or skip.
+  - The Master's posts get at most 5 reactions a day (`qzone_master_comment_max_per_day`).
+  - Other friends' posts get at most 3 a day (`qzone_comment_max_per_day`).
+  - It never comments twice on the same post.
+- **Its own posts**: each day there is a 40% chance (`qzone_random_post_chance_per_day`) that at a random time between 9:00 and 23:00 (`qzone_active_hours`) it wants to post. It sends the draft to the Master first (`[Qzone draft D3] …`). It posts only after the Master says OK, drops it if the Master says no, and can rewrite it on request. Drafts expire after 24 hours.
+- **Asking it to post**:
+  - When the Master's own message asks for a post ("发条说说", "post this on Qzone"…), in private chat or in a group, it posts directly. The program checks the Master's actual words (quoted text doesn't count); anything the model decides on its own becomes a draft.
+  - A draft is posted only when the Master's reply approves it (发吧 / 可以 / ok…, with no 不要 / 别 / 算了 / no); a changed text becomes a new draft to approve.
+  - When a group member asks, the post becomes a draft for the Master to approve (at most 3 a day, `qzone_member_request_max_per_day`).
+- **In private chat** the Master can say "look at my Qzone", "look at QQ:xxx's Qzone", "what have my friends posted" (newest posts from the last 24 hours by the Master and all friends, up to 10; at most 20 more spaces read per request) or "comment on my latest post". The bot also remembers what it recently did on Qzone.
+
+### 16.2 Privacy and safety
+- Qzone is visible to all of the bot's QQ friends, so it is treated like a group chat: no private memory, plain text only (the Master's QQ number is hidden only with `hide_master_qq`).
+- Other people's posts and comments are untrusted; instructions inside them are never followed.
+- Its own posts and members' requests need the Master's approval; only the Master's own requests (checked by QQ ID) are posted directly.
+- Its own posts plus members' requests are capped at 3 a day (`qzone_post_max_per_day`); the Master's requests are exempt.
+- It stays off in single-account mode (`bot_qq == master_qq`).
+
+### 16.3 Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `enable_qzone` | `false` | Main switch |
+| `qzone_check_interval_sec` | `1800` | How often to look for new posts (minimum 300) |
+| `qzone_friends_per_check` | `5` | Friends checked each time, in turn (the Master always) |
+| `qzone_max_post_age_hours` | `24` | Older posts are ignored |
+| `qzone_master_comment_max_per_day` | `5` | Reactions to the Master's posts per day |
+| `qzone_comment_max_per_day` | `3` | Reactions to other friends' posts per day |
+| `qzone_random_posts` | `true` | Whether it sometimes wants to post on its own |
+| `qzone_random_post_chance_per_day` | `0.4` | Daily chance of wanting to post |
+| `qzone_active_hours` | `[9, 23]` | Hours for its own posts |
+| `qzone_post_approval` | `true` | Own posts go to the Master first (off: post directly and tell the Master) |
+| `qzone_post_max_per_day` | `3` | Daily cap on its own and members' posts |
+| `qzone_member_request_max_per_day` | `3` | Post requests from group members per day |
+| `qzone_draft_expire_hours` | `24` | Unanswered drafts expire after this |
+
+State is kept in `sessions/qzone/state.json` (seen posts, drafts, recent activity). Text only for now; pictures will come later.
+
+---
+
+## 17. Friend Chat
+
+Besides the Master, the bot can chat privately with other QQ friends. Off by default; turn it on with `"enable_friend_chat": true` in `config.json`. Like group chats, these chats are treated as public and untrusted.
+
+### 17.1 Rules
+- **Who**: all of the bot's QQ friends except the QQ numbers in `friend_blacklist`. The Master's own private chat is unaffected.
+- **Identity by QQ number only**: someone saying they are the Master or an admin changes nothing; only the Master's QQ number is the Master.
+- **Separate memory**: each friend has their own folder `sessions/private_<QQ>/` (memory, chat log, message counter). The Master's private memory never appears in these chats, and friends can't see each other's.
+- **Message limit**: each friend can trigger at most `private_member_msg_limit` replies per 24 hours (counted separately from groups). If the setting is missing, 50 is used and a WARNING is logged; `0` = unlimited. Ignored messages are logged; `private_member_limit_notice` can set a one-time notice (none by default).
+- **What it can do**: web search, search/remember this chat's own memory, send public stickers. It can't modify or delete pictures or save the friend's pictures into the library. Qzone post requests only become drafts for the Master.
+- **Telling the Master**: if something matters, it can message the Master privately (e.g. `[private chat with Li (QQ:123)] …`), sharing the hourly cap with groups.
+- **Master recall**: in the Master's private chat, "what did you talk about with Li?" uses `[friend_recall: QQ or name]` / `recall_friend_chat` (read-only).
+- Off in single-account mode (`bot_qq == master_qq`), where the bot would be answering the Master's friends as the Master.
+
+### 17.2 Finding new messages
+- Uses NapCat's recent contacts (`get_recent_contact`) every 3 seconds and only reads chats that changed.
+- If NapCat doesn't support it, checks 5 friends per round in turn (`friend_poll_batch`).
+- Messages older than 3 minutes at startup are not answered.
+
+### 17.3 Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `enable_friend_chat` | `false` | Main switch |
+| `friend_blacklist` | `[]` | QQ numbers never answered |
+| `private_member_msg_limit` | `50` if unset (with a warning) | Replies per friend per window; `0` = unlimited |
+| `private_member_limit_window_sec` | `86400` | Counting window; `0` = never resets |
+| `private_member_limit_notice` | `""` | One-time notice when a friend hits the limit |
+| `friend_poll_interval_sec` | `3` | How often to check for new messages |
+| `friend_poll_batch` | `5` | Friends checked per round when recent contacts aren't available |

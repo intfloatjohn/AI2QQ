@@ -186,7 +186,8 @@ def qq_send_image(image_path: str, user_id: int = MASTER_QQ) -> str:
     """Send image or sticker via CQ code."""
     file_arg = image_path
     if not image_path.startswith("http") and not image_path.startswith("base64://"):
-        file_arg = f"file:///{image_path.replace('\\', '/')}"
+        posix_path = image_path.replace("\\", "/")
+        file_arg = f"file:///{posix_path}"
     cq_code = f"[CQ:image,file={file_arg}]"
     res = call_onebot_api("send_private_msg", {"user_id": user_id, "message": cq_code})
     return json.dumps(res, ensure_ascii=False)
