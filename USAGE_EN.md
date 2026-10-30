@@ -379,7 +379,11 @@ Other group messages don't trigger a reply; they are only shown to the model as 
 - No code path reachable from a group session opens the Master's private files. In a group, `[read_memory]`, `[search_history]` and `[remember]` only act on that group, and `agent.log` (which mixes every chat) is never searched.
 - **Even when the Master speaks in a group, the group-side model gets no private memory**: group replies are public, and the same batch may contain other people's injected text. Ask private things in private chat.
 - The Master's QQ number is not hidden by default (anyone on QQ can see QQ numbers, and identity is checked by ID, so knowing the number doesn't let anyone pretend to be the Master). To hide it, set `"hide_master_qq": true`: group replies and Qzone then show `[Master's QQ number hidden]`, and the bot only says it when the Master asks (every message in that batch came from the Master).
-- Groups are isolated from each other; group A's memory is invisible in group B.
+- **Memory mode** (`memory_mode`):
+  - `"shared"` (default): all groups and friend chats share one **shared memory** (`sessions/public/memory_summary.txt`), each entry tagged with its source (e.g. `[group "Test" (900)]`, `[private chat with QQ:555]`). People the bot meets in a group are recognised in private chat too, so conversations stay continuous. Only the Master's private memory is kept apart and never enters the shared memory.
+  - `"separate"`: each group and each friend only sees its own memory; group A's memory is invisible in group B.
+  - In both modes each group's (`sessions/group_<ID>/`) and each friend's (`sessions/private_<QQ>/`) own memory file is still written, so switching to `"separate"` later gives complete per-chat memories. The first time shared mode is used, existing group/friend memories are copied into the shared memory, tagged with their source.
+  - Note for shared mode: something a friend said in private may come up in a group. The model is told not to record or repeat things people clearly wouldn't want public.
 - **Memory flows one way**: in private chat, when the Master asks "what happened in the group today?", the companion can use `[group_recall: group ID or keyword]` or the `recall_group_chat` tool.
 - Each group memory entry is tagged with its source, e.g. `(source: QQ:123(Alice))`, written by the program from real QQ IDs. Group memory has a size cap (`group_memory_max_chars`) and is auto-compacted like private memory.
 
@@ -436,7 +440,9 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 | `group_glance_interval_sec` / `group_glance_min_new_messages` / `group_glance_max_per_hour` | `600` / `5` / `4` | Glance interval, minimum new messages, per-group hourly cap |
 | `group_max_tokens` | `800` | Max tokens for a group reply |
 | `group_max_bubbles` | `3` | Max bubbles per group reply |
-| `group_memory_max_chars` | `3000` | Size cap of each group's long-term memory (oldest entries dropped) |
+| `group_memory_max_chars` | `3000` | Size of each group's (and each friend's) own memory; past it, duplicates are merged (backup first) |
+| `memory_mode` | `"shared"` | `shared`: groups and friend chats share one memory; `separate`: one per chat |
+| `public_memory_max_chars` | `8000` | Size of the shared memory; past it, duplicates are merged (backup first) |
 | `group_log_ambient` | `true` | Also archive non-trigger messages in the group's log (for recall) |
 | `group_max_file_bytes` | `8388608` | Max size of group files that get parsed (bytes) |
 | `group_poll_interval_sec` | `1.5` | Group polling interval (seconds) |
@@ -506,7 +512,7 @@ Besides the Master, the bot can chat privately with other QQ friends. Off by def
 ### 17.1 Rules
 - **Who**: all of the bot's QQ friends except the QQ numbers in `friend_blacklist`. The Master's own private chat is unaffected.
 - **Identity by QQ number only**: someone saying they are the Master or an admin changes nothing; only the Master's QQ number is the Master.
-- **Separate memory**: each friend has their own folder `sessions/private_<QQ>/` (memory, chat log, message counter). The Master's private memory never appears in these chats, and friends can't see each other's.
+- **Memory**: each friend has their own folder `sessions/private_<QQ>/` (memory, chat log, message counter). The Master's private memory never appears in these chats. By default (`memory_mode: "shared"`) friend chats and groups share one memory, so the bot recognises the same person in both; with `"separate"` each friend only sees their own (see §15).
 - **Message limit**: each friend can trigger at most `private_member_msg_limit` replies per 24 hours (counted separately from groups). If the setting is missing, 50 is used and a WARNING is logged; `0` = unlimited. Ignored messages are logged; `private_member_limit_notice` can set a one-time notice (none by default).
 - **What it can do**: web search, search/remember this chat's own memory, send public stickers. It can't modify or delete pictures or save the friend's pictures into the library. Qzone post requests only become drafts for the Master.
 - **Telling the Master**: if something matters, it can message the Master privately (e.g. `[private chat with Li (QQ:123)] …`), sharing the hourly cap with groups.
