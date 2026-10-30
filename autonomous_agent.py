@@ -740,6 +740,11 @@ def load_system_prompt() -> str:
         try:
             with open(fpath, "r", encoding="utf-8-sig") as f:
                 prompt_text = f.read().strip()
+                # Optional sections: <!-- QZONE --> ... <!-- /QZONE --> only while Qzone is on
+                if qzone_enabled():
+                    prompt_text = re.sub(r'[ \t]*<!-- /?QZONE -->[ \t]*\n?', '', prompt_text)
+                else:
+                    prompt_text = re.sub(r'[ \t]*<!-- QZONE -->.*?<!-- /QZONE -->[ \t]*\n?', '', prompt_text, flags=re.S)
                 hint_key = "single_message_limit_hint_en" if lang == "en" else "single_message_limit_hint"
                 limit_hint = config.get(hint_key, config.get("single_message_limit_hint", ""))
                 if limit_hint:
