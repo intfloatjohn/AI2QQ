@@ -466,7 +466,7 @@ The bot can use QQ Zone (QQ空间): read the Master's and friends' posts, commen
 - **Asking it to post**:
   - When the Master asks, in private chat or in a group, it posts directly.
   - When a group member asks, the post becomes a draft for the Master to approve (at most 3 a day, `qzone_member_request_max_per_day`).
-- **In private chat** the Master can say "look at my Qzone", "look at QQ:xxx's Qzone" or "comment on my latest post". The bot also remembers what it recently did on Qzone.
+- **In private chat** the Master can say "look at my Qzone", "look at QQ:xxx's Qzone", "what have my friends posted" (newest posts from the last 24 hours by the Master and all friends, up to 10; at most 20 more spaces read per request) or "comment on my latest post". The bot also remembers what it recently did on Qzone.
 
 ### 16.2 Privacy and safety
 - Qzone is visible to all of the bot's QQ friends, so it is treated like a group chat: no private memory, plain text only (the Master's QQ number is hidden only with `hide_master_qq`).

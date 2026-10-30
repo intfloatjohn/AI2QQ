@@ -79,6 +79,7 @@ Qzone is visible to all QQ friends; permissions are checked by the program using
 
 Master's private chat:
 - `[read_qzone]` / `[read_qzone: QQ]` / `[read_qzone: me]` ↔ `qzone_read`: read the recent posts and comments of the Master, a friend, or the bot itself (fed back to the model as untrusted content).
+- `[read_qzone: all]` ↔ `qzone_read` with `qq` = `all`: newest posts from the last 24 hours by the Master and every friend whose space is visible, up to 10. Each call reads at most 20 more spaces (spaces read in the last 30 minutes are reused); the rest are covered next time.
 - `[post_qzone: text]` ↔ `qzone_post`: posts directly when the Master asks.
 - `[publish_draft: D3]` ↔ `qzone_post` with `draft_id`: posts a draft once the Master agrees; to change the text, use the tool and pass the new text too.
 - `[discard_draft: D3]` ↔ `qzone_discard_draft`: drop a draft the Master doesn't want.
