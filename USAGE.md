@@ -254,6 +254,9 @@ python3 mcp-server/onebot_mcp.py
 * `debounce_delay_sec`: 防连击缓冲窗口（秒）。用户连续发多句话时，等待 2.2 秒打包合并一次性思考回复。
 * `max_batch_wait_sec`: 批处理最大等待上限（秒）。防止用户持续不断发消息导致一直等待。
 * `enable_multi_bubble_reply`: 是否启用 `[SEP]` 拆分为真实多气泡连发。模型用空行分段时也会拆成多个气泡（含代码块、表格、列表时除外）。
+* `time_awareness`（默认 `true`）：告诉模型现在的日期、星期和时间，每条消息前也会标上发送时间（今天的写 `[14:05]`，更早的写 `[10-29 23:10]`）。这样它能分清早上晚上、知道隔了多久、记得约好的日子。模型自己的回复里不会出现这些时间标记。
+* `timezone`：时区，如 `"Asia/Shanghai"` 或 `"+08:00"`。留空用服务器自己的时钟（很多云服务器是 UTC，建议设置）。Windows 上用时区名需要 `pip install tzdata`，或者直接写 `"+08:00"`。
+* `time_gap_note_hours`（默认 `3`）：私聊隔了这么久再说话时，会提示模型“距离上一次聊天已经过去了 N 小时/天”。
 * `private_max_bubbles`: 私聊一次回复最多几个气泡（默认 4，多出的部分合并进最后一个）。群聊用 `group_max_bubbles`。
 * `enable_vision` / `enable_audio_input`: 模型能否看图 / 听语音。默认 `null` = 按模型名自动判断。纯文本模型收到图片或语音时，机器人会发一条固定的系统提示（如 `NOT A VISION MODEL`）；如果模型接口因为图片或语音报错，会去掉它们重试一次，并提示 `VISION IS NOT AVAILABLE: API ERROR`。同一种提示私聊 10 分钟、群聊 1 小时最多一次。判断错了可以手动设为 `true` / `false`。
 * `enable_picture_database`: 是否启用自主图库与表情包存储检索系统。

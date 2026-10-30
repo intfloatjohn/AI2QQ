@@ -145,6 +145,9 @@ config = {
     "group_max_bubbles": 3,
     "group_memory_max_chars": 3000,
     "memory_max_chars": 8000,
+    "time_awareness": True,                   # Tell the model the current time and when each message was sent
+    "timezone": "",                           # e.g. "Asia/Shanghai" or "+08:00"; "" = the server's clock
+    "time_gap_note_hours": 3,                 # Mention "it has been N hours" after this long a silence
     "memory_mode": "shared",                  # shared: groups + friend chats share one memory (Master's stays apart); separate: per chat
     "public_memory_max_chars": 8000,
     "thinking_level": "",                     # "" = provider default; none / minimal / low / medium / high
@@ -960,6 +963,105 @@ def share_memory_fact(session: "ChatSession", fact: str):
                 finally:
                     public.consolidating = False
             threading.Thread(target=_run, daemon=True).start()
+
+# ==============================================================================
+# Time awareness: the model is told the current time, and every message carries the time it
+# was sent, so it can tell morning from night, notice long gaps, and answer "what time is it".
+# ==============================================================================
+_tz_warned = False
+WEEKDAYS_ZH = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+def _local_tz():
+    """config "timezone": an IANA name like "Asia/Shanghai", an offset like "+08:00", or "" for the
+    server's own clock (servers often run on UTC, so setting it is recommended)."""
+    global _tz_warned
+    name = str(config.get("timezone") or "").strip()
+    if not name:
+        return None
+    m = re.fullmatch(r'(?:UTC|GMT)?\s*([+-])(\d{1,2})(?::?(\d{2}))?', name, re.IGNORECASE)
+    if m:
+        delta = datetime.timedelta(hours=int(m.group(2)), minutes=int(m.group(3) or 0))
+        return datetime.timezone(delta if m.group(1) == "+" else -delta)
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception as e:
+        if not _tz_warned:
+            _tz_warned = True
+            logging.warning(f"Unknown timezone '{name}' ({e}); using the server clock. On Windows, 'pip install tzdata' "
+                            "or use an offset like \"+08:00\".")
+        return None
+
+def local_dt(ts: float = None) -> datetime.datetime:
+    tz = _local_tz()
+    ts = time.time() if ts is None else float(ts)
+    return datetime.datetime.fromtimestamp(ts, tz) if tz else datetime.datetime.fromtimestamp(ts)
+
+def time_awareness_on() -> bool:
+    return bool(config.get("time_awareness", True))
+
+def msg_time_marker(ts: float = None, now: float = None) -> str:
+    """"[14:05]" for today, "[10-29 23:10]" for an earlier day."""
+    if not time_awareness_on():
+        return ""
+    d, n = local_dt(ts), local_dt(now)
+    return f"[{d.strftime('%H:%M')}] " if d.date() == n.date() else f"[{d.strftime('%m-%d %H:%M')}] "
+
+def _human_gap(seconds: float) -> str:
+    hours = seconds / 3600
+    if hours < 24:
+        h = int(round(hours))
+        return L(f"{h} 小时", f"{h} hour{'s' if h != 1 else ''}")
+    days = int(hours // 24)
+    return L(f"{days} 天", f"{days} day{'s' if days != 1 else ''}")
+
+def gap_note(session: "ChatSession", now: float = None) -> str:
+    """A short note when this chat has been quiet for a long time (default 3 h)."""
+    if not time_awareness_on():
+        return ""
+    now = time.time() if now is None else now
+    last = 0.0
+    with session.mem_lock:
+        for turn in reversed(session.history):
+            if isinstance(turn, dict) and turn.get("ts"):
+                last = float(turn["ts"])
+                break
+    if not last and os.path.exists(session.chat_log_file):
+        # History saved before timestamps existed: use the chat log's last entry
+        try:
+            with open(session.chat_log_file, "r", encoding="utf-8") as fh:
+                tail = deque(fh, maxlen=1)
+            if tail:
+                last = datetime.datetime.strptime(json.loads(tail[0]).get("time", ""), "%Y-%m-%d %H:%M:%S").timestamp()
+        except Exception:
+            last = 0.0
+    try:
+        threshold = float(config.get("time_gap_note_hours", 3)) * 3600
+    except (TypeError, ValueError):
+        threshold = 3 * 3600
+    if not last or threshold <= 0 or now - last < threshold:
+        return ""
+    return L(f"（距离你们上一次聊天已经过去了 {_human_gap(now - last)}）", f"(It has been {_human_gap(now - last)} since you last talked.)")
+
+def current_time_section() -> str:
+    if not time_awareness_on():
+        return ""
+    d = local_dt()
+    hour = d.hour
+    if config.get("language", "zh").lower() == "en":
+        part = "late night" if hour < 5 else "morning" if hour < 11 else "midday" if hour < 13 else "afternoon" if hour < 18 else "evening" if hour < 23 else "late night"
+        return (f"【Current time】{d.strftime('%A, %Y-%m-%d %H:%M')} ({part}).\n"
+                "Each message starts with the time it was sent, e.g. [14:05] or [10-29 23:10]; it is added by the system. "
+                "Use it naturally (greetings, how long ago something was said, plans and dates), but never write such time markers in your own replies.")
+    part = "深夜" if hour < 5 else "早上" if hour < 9 else "上午" if hour < 11 else "中午" if hour < 13 else "下午" if hour < 18 else "晚上" if hour < 23 else "深夜"
+    return (f"【现在的时间】{d.year}年{d.month}月{d.day}日 {WEEKDAYS_ZH[d.weekday()]} {part} {d.strftime('%H:%M')}。\n"
+            "每条消息开头的 [14:05]、[10-29 23:10] 是系统标注的发送时间。像真人一样自然地留意时间（问候、隔了多久、约好的日期和计划），"
+            "但你自己的回复里不要写这种时间标记。")
+
+_TIME_MARKER_RE = re.compile(r'^\s*\[(?:\d{1,2}-\d{1,2} )?\d{1,2}:\d{2}\]\s*', re.MULTILINE)
+
+def strip_time_markers(text: str) -> str:
+    return _TIME_MARKER_RE.sub('', text or "")
 
 def update_memory_realtime(session: ChatSession, content: str, ctx: dict = None) -> str:
     """Appends a fact to the session's own memory file immediately.
@@ -2895,7 +2997,7 @@ def sanitize_reply(text: str, session: "ChatSession" = None, ctx: dict = None) -
     cleaned = cleaned.replace('**', '').replace('*', '')
     # 5. Strip acting notes such as （低头脸红） / (smiles); keep every other bracket
     cleaned = strip_stage_actions(cleaned)
-    cleaned = cleaned.strip()
+    cleaned = strip_time_markers(cleaned).strip()
 
     # Strip any accidental single numbered list prefix (e.g. '1. ', '1、', '1: ')
     cleaned = re.sub(r'^(?:1[.\、\s]|1\s*[-:])\s*', '', cleaned)
@@ -3455,9 +3557,11 @@ def record_chat_turn(session: ChatSession, user_content: str, assistant_reply: s
     with session.mem_lock:
         clean_user = user_content.strip()
         clean_assistant = clean_tags(assistant_reply).strip()
-        session.history.append({"role": "user", "content": clean_user})
-        session.history.append({"role": "assistant", "content": clean_assistant})
+        now_ts = time.time()
+        session.history.append({"role": "user", "content": clean_user, "ts": now_ts})
+        session.history.append({"role": "assistant", "content": clean_assistant, "ts": now_ts})
         session.save_history()
+    clean_user = strip_time_markers(clean_user)
 
     # Append to the session's persistent full chat history file
     if session.is_group:
@@ -3696,6 +3800,10 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
             friend_index = get_friend_index_for_master()
             if friend_index:
                 system_prompt += f"\n\n{friend_index}"
+
+    time_section = current_time_section()
+    if time_section:
+        system_prompt += f"\n\n{time_section}"
 
     url = get_llm_url()
 
@@ -4240,7 +4348,7 @@ def build_group_turn(session: ChatSession, batch: list) -> tuple:
             txt = a["text"]
         if a.get("quote"):
             txt += f"\n{a['quote']}"
-        bg_lines.append(f"{group_speaker_label(a['uid'], a['name'])} {_indent_continuation(txt)}")
+        bg_lines.append(f"{msg_time_marker(a.get('ts'))}{group_speaker_label(a['uid'], a['name'])} {_indent_continuation(txt)}")
 
     # --- Messages addressed to the bot
     now_lines = []
@@ -4252,7 +4360,7 @@ def build_group_turn(session: ChatSession, batch: list) -> tuple:
         auds = it.get("audios") or []
         if not txt and not nums and not auds:
             txt = L("（只叫了你一下，没有说别的）", "(just called you, nothing else)")
-        line = f"{label}{how} {_indent_continuation((txt + _attachment_ref(nums)).strip())}"
+        line = f"{msg_time_marker(it.get('ts') or it.get('time'))}{label}{how} {_indent_continuation((txt + _attachment_ref(nums)).strip())}"
         if it.get("quote"):
             line += f"\n    {it['quote']}"
         now_lines.append(line)
@@ -4397,6 +4505,11 @@ def _run_generation(session: ChatSession, batch_to_process: list, gen_id: int):
             has_img = bool(imgs)
             img_tag_prompt = "[Sent an Image]" if lang == "en" else "[发送了图片]"
             img_tag_hist = "[Image]" if lang == "en" else "[图片]"
+            mark = msg_time_marker(item.get("time"))
+            if txt:
+                txt = mark + txt
+            elif mark:
+                img_tag_prompt, img_tag_hist = mark + img_tag_prompt, mark + img_tag_hist
 
             if txt and has_img:
                 lines_for_llm.append(f"{txt} {img_tag_prompt}")
@@ -4411,6 +4524,10 @@ def _run_generation(session: ChatSession, batch_to_process: list, gen_id: int):
         if not lines_for_llm and not all_images and not all_audios:
             _reset_if_idle()
             return
+
+        gap = gap_note(session)
+        if gap and lines_for_llm:
+            lines_for_llm[0] = f"{gap}\n{lines_for_llm[0]}"
 
         if len(lines_for_llm) <= 1:
             # Single non-combined message: pure raw user message with NO numbered prefix!
@@ -5466,8 +5583,8 @@ def maybe_glance(session: ChatSession):
 def run_glance(session: ChatSession, fresh: list):
     try:
         lang = config.get("language", "zh").lower()
-        lines = "\n".join(f"{group_speaker_label(a['uid'], a['name'])} {_indent_continuation(a['text'])}" for a in fresh)
-        prompt = (build_group_system_prompt(session) + "\n\n" + (GLANCE_RULES_EN if lang == "en" else GLANCE_RULES_ZH)
+        lines = "\n".join(f"{msg_time_marker(a.get('ts'))}{group_speaker_label(a['uid'], a['name'])} {_indent_continuation(a['text'])}" for a in fresh)
+        prompt = (build_group_system_prompt(session) + "\n\n" + current_time_section() + "\n\n" + (GLANCE_RULES_EN if lang == "en" else GLANCE_RULES_ZH)
                   + "\n\n" + L("【群里最近的聊天（你没有被叫到）】", "【Recent group chat (you were not called)】") + "\n" + lines)
         reply = raw_llm_call(prompt, max_tokens=300) or ""
         told = _TELL_MASTER_RE.findall(reply)
@@ -5670,7 +5787,8 @@ def qzone_summary_for_master() -> str:
 
 def _qzone_prompt_base() -> str:
     lang = config.get("language", "zh").lower()
-    return redact_master_qq(load_system_prompt()) + "\n\n" + (QZONE_RULES_EN if lang == "en" else QZONE_RULES_ZH)
+    return (redact_master_qq(load_system_prompt()) + "\n\n" + (QZONE_RULES_EN if lang == "en" else QZONE_RULES_ZH)
+            + "\n\n" + current_time_section())
 
 # ---------------------------------------------------------------- publishing
 def qzone_publish(text: str, source: str, redact: bool = True, by_master: bool = False) -> str:
