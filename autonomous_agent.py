@@ -3536,6 +3536,12 @@ def execute_action_tags(session: ChatSession, reply_text: str, ctx: dict = None)
                 logging.info(f"Inline Qzone publish draft: {execute_qzone_tool(session, 'qzone_post', {'draft_id': did.strip()}, ctx)}")
             for did in _QZ_TAG_DISCARD_RE.findall(reply_text)[:3]:
                 logging.info(f"Inline Qzone discard draft: {execute_qzone_tool(session, 'qzone_discard_draft', {'draft_id': did.strip()}, ctx)}")
+            for body in _QZ_TAG_COMMENT_RE.findall(reply_text)[:2]:
+                pid, qq, text = parse_qzone_comment_tag(body)
+                if not pid or not text:
+                    logging.warning(f"[qzone] Comment tag not understood: {body[:80]}")
+                    continue
+                logging.info(f"Inline Qzone comment: {execute_qzone_tool(session, 'qzone_comment', {'post_id': pid, 'qq': qq, 'text': text}, ctx)}")
 
     # 8b. Visibility of pictures in group chats (Master's private chat only)
     if session.is_master_private:
@@ -5751,8 +5757,26 @@ _QZ_TAG_POST_RE = re.compile(r'\[(?:发说说|发空间|qzone_post|Post Qzone|po
 _QZ_TAG_PUBLISH_RE = re.compile(r'\[(?:发布草稿|同意草稿|publish_draft|Publish Draft):\s*([^\]]+)\]', re.IGNORECASE)
 _QZ_TAG_DISCARD_RE = re.compile(r'\[(?:放弃草稿|discard_draft|Discard Draft):\s*([^\]]+)\]', re.IGNORECASE)
 _QZ_TAG_READ_RE = re.compile(r'\[(?:看空间|查看空间|read_qzone|Read Qzone)(?::\s*([^\]]*))?\]', re.IGNORECASE)
+_QZ_COMMENT_NAMES = r'评论说说|评论空间|空间评论|评论|qzone_comment|comment_qzone|Comment Qzone|Comment Post|comment'
+_QZ_TAG_COMMENT_RE = re.compile(r'\[(?:' + _QZ_COMMENT_NAMES + r')\s*[:：]\s*([^\]]+)\]', re.IGNORECASE)
 _QZ_ANY_TAG_RE = re.compile(r'\[(?:发说说|发空间|qzone_post|Post Qzone|post_qzone|发布草稿|同意草稿|publish_draft|Publish Draft|'
-                            r'放弃草稿|discard_draft|Discard Draft|看空间|查看空间|read_qzone|Read Qzone)(?::[^\]]*)?\]', re.IGNORECASE)
+                            r'放弃草稿|discard_draft|Discard Draft|看空间|查看空间|read_qzone|Read Qzone|' + _QZ_COMMENT_NAMES +
+                            r')(?:\s*[:：][^\]]*)?\]', re.IGNORECASE)
+
+def parse_qzone_comment_tag(body: str):
+    """[评论说说: ...] -> (post_id, qq, text). Accepts 'post_id=X, text=Y' (qq= optional),
+    'X: Y', 'X, Y' and '#X Y'."""
+    body = (body or "").strip()
+    m = re.search(r'(?:^|[,，;；\s])(?:text|comment|content|内容|评论)\s*[=＝:：]\s*', body, re.IGNORECASE)
+    if m:
+        head, text = body[:m.start()], body[m.end():]
+        pid = re.search(r'(?:post_?id|tid|id|说说编号|编号|说说)\s*[=＝:：]\s*#?([0-9A-Za-z_]+)', head, re.IGNORECASE)
+        qq = re.search(r'(?:qq|owner|uin|作者)\s*[=＝:：]\s*(\d{5,12})', head, re.IGNORECASE)
+        return (pid.group(1) if pid else ""), (qq.group(1) if qq else ""), text.strip().strip('"“”\'')
+    m = re.match(r'#?([0-9A-Za-z_]{6,})\s*[,，:：|｜\s]\s*(.+)$', body, re.DOTALL)
+    if m:
+        return m.group(1), "", m.group(2).strip()
+    return "", "", 
 QZONE_GROUP_RULE_ZH = ("7. QQ空间：有人请你发QQ空间说说时，用 qzone_post 工具（或写 [发说说: 内容]）。主人本人请求会直接发出；"
                        "其他群友请求的只会变成草稿，先私聊发给主人确认，要如实告诉对方“已经交给主人确认了”。空间是公开的，不要写主人或群友的隐私。")
 QZONE_GROUP_RULE_EN = ("7. Qzone: when someone asks you to post on Qzone, use the qzone_post tool (or write [post_qzone: text]). The Master's own "
@@ -5877,8 +5901,8 @@ def qzone_summary_for_master() -> str:
         acts = list(st["activity"])[-8:]
     lines = [L("【QQ空间】你可以用 qzone_* 工具看说说、发说说、评论。你自己想发的和群友请你发的说说都是草稿，主人同意后才用 qzone_post（填 draft_id）发出。",
                "【Qzone】Use the qzone_* tools to read posts, post and comment. Posts you want to write yourself and posts group members ask for are drafts; publish them with qzone_post (draft_id) only after your Master agrees.")]
-    lines.append(L("如果不方便用工具，也可以在回复里写：[看空间]（看主人的）/ [看空间: QQ号] / [看空间: 我] / [看空间: 全部]（主人和所有好友的新说说）、[发说说: 内容]、[发布草稿: D3]、[放弃草稿: D3]。",
-                   "If you can't use tools, write these in your reply instead: [read_qzone] (Master's) / [read_qzone: QQ] / [read_qzone: me] / [read_qzone: all] (newest posts from Master and all friends), [post_qzone: text], [publish_draft: D3], [discard_draft: D3]."))
+    lines.append(L("如果不方便用工具，也可以在回复里写：[看空间]（看主人的）/ [看空间: QQ号] / [看空间: 我] / [看空间: 全部]（主人和所有好友的新说说）、[发说说: 内容]、[发布草稿: D3]、[放弃草稿: D3]、[评论说说: post_id=说说编号, text=评论内容]（编号来自看空间的结果）。",
+                   "If you can't use tools, write these in your reply instead: [read_qzone] (Master's) / [read_qzone: QQ] / [read_qzone: me] / [read_qzone: all] (newest posts from Master and all friends), [post_qzone: text], [publish_draft: D3], [discard_draft: D3], [comment_qzone: post_id=ID, text=comment] (IDs come from read_qzone)."))
     if drafts:
         lines.append(L("等主人确认的草稿：", "Drafts waiting for your Master:"))
         for did, d in drafts:
@@ -5986,6 +6010,15 @@ QZONE_FEED_HOURS = 24
 
 def _qzone_cache_posts(uin: int, posts: list):
     _qzone_feed_cache[int(uin)] = (time.time(), posts)
+
+def qzone_post_from_cache(tid: str):
+    """(owner QQ, post) for a post ID seen in an earlier read, or (0, None)."""
+    tid = str(tid or "").strip().lstrip("#")
+    for uin, (_, posts) in list(_qzone_feed_cache.items()):
+        for p in posts or []:
+            if str(p.get("tid")) == tid:
+                return uin, p
+    return 0, None
 
 def qzone_read_feed() -> str:
     """Newest posts from the Master and all friends whose spaces are visible. Uses posts fetched
@@ -6412,8 +6445,11 @@ def execute_qzone_tool(session: ChatSession, tool_name: str, arguments: dict, ct
         uin = get_bot_qq() if q in ("me", "self", "bot", "自己", "我") else (to_int(q, 0) or to_int(config.get("master_qq"), 0))
         return qzone_read_posts(uin)
     if tool_name == "qzone_comment":
-        owner = to_int(arguments.get("qq"), 0) or to_int(config.get("master_qq"), 0)
-        return qzone_comment_post(owner, str(arguments.get("post_id") or ""), str(arguments.get("text") or ""))
+        tid = str(arguments.get("post_id") or "").strip().lstrip("#")
+        cached_owner, post = qzone_post_from_cache(tid)
+        owner = to_int(arguments.get("qq"), 0) or cached_owner or to_int(config.get("master_qq"), 0)
+        return qzone_comment_post(owner, tid, str(arguments.get("text") or ""),
+                                  (post or {}).get("content", ""), (post or {}).get("name", ""))
     return denied
 
 QZONE_TOOL_NAMES = {"qzone_post", "qzone_discard_draft", "qzone_read", "qzone_comment"}
