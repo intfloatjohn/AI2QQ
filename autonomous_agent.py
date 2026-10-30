@@ -145,6 +145,7 @@ config = {
     "group_max_bubbles": 3,
     "group_memory_max_chars": 3000,
     "memory_max_chars": 8000,
+    "usage_stats": True,                      # Record token usage per model call in usage_stats/ (numbers only)
     "time_awareness": True,                   # Tell the model the current time and when each message was sent
     "timezone": "",                           # e.g. "Asia/Shanghai" or "+08:00"; "" = the server's clock
     "time_gap_note_hours": 3,                 # Mention "it has been N hours" after this long a silence
@@ -1506,7 +1507,7 @@ def trigger_auto_compact(session: ChatSession):
         f"{rules}\n\n【Existing Memory】:\n{memory_snapshot or 'None yet'}\n\n【Dialogue to Archive】:\n{formatted_dialogue}")
 
     try:
-        text, finish = raw_llm_call_full(prompt, max_tokens=1500)
+        text, finish = raw_llm_call_full(prompt, max_tokens=1500, purpose="memory_compact")
     except Exception as e:
         logging.error(f"AutoCompact [{session.key}] failed, history kept for next time: {e}")
         return
@@ -1565,7 +1566,7 @@ def consolidate_memory(session: ChatSession):
         "One fact per line starting with \"- \", oldest first. Output only the list.\n\n"
         f"【Long-term memory】:\n{before}")
     try:
-        text, finish = raw_llm_call_full(prompt, max_tokens=4000)
+        text, finish = raw_llm_call_full(prompt, max_tokens=4000, purpose="memory_tidy")
     except Exception as e:
         logging.warning(f"[{session.key}] Memory consolidation failed (memory unchanged): {e}")
         return
@@ -1713,8 +1714,93 @@ def model_supports_vision(model_name: str = None) -> bool:
 
     return True
 
-def raw_llm_call(prompt: str, max_tokens: int = 800) -> str:
-    return raw_llm_call_ex(prompt, max_tokens)[0]
+# ==============================================================================
+# Usage statistics: one line per model call in usage_stats/usage-YYYY-MM-DD.jsonl (numbers only,
+# never message content). Summarise with:  python3 usage_report.py
+# ==============================================================================
+USAGE_DIR = os.path.join(BASE_DIR, "usage_stats")
+_usage_lock = threading.Lock()
+_last_system_hash = {}
+
+def _payload_stats(payload: dict) -> dict:
+    msgs = (payload or {}).get("messages") or []
+    system = msgs[0].get("content", "") if msgs and msgs[0].get("role") == "system" else ""
+    images = audios = 0
+    chars = 0
+    for m in msgs:
+        c = m.get("content")
+        if isinstance(c, list):
+            for item in c:
+                t = item.get("type") if isinstance(item, dict) else None
+                if t == "image_url":
+                    images += 1
+                elif t == "input_audio":
+                    audios += 1
+                elif t == "text":
+                    chars += len(item.get("text") or "")
+        elif isinstance(c, str):
+            chars += len(c)
+    tools = (payload or {}).get("tools") or []
+    return {
+        "messages": len(msgs), "input_chars": chars, "system_chars": len(system if isinstance(system, str) else ""),
+        "images": images, "audios": audios, "tools": len(tools),
+        "tools_chars": len(json.dumps(tools, ensure_ascii=False)) if tools else 0,
+        "_system": system if isinstance(system, str) else "",
+    }
+
+def record_usage(purpose: str, data: dict = None, *, session=None, payload: dict = None, latency: float = 0.0,
+                 iteration: int = 0, attempt: int = 0, status: int = 200, error: str = "", note: str = "",
+                 superseded: bool = False):
+    """Appends one model call to today's usage file. Never raises."""
+    if not config.get("usage_stats", True):
+        return
+    try:
+        stats = _payload_stats(payload)
+        system = stats.pop("_system")
+        key = session.key if session is not None else purpose
+        sys_hash = hashlib.sha1(system.encode("utf-8", "ignore")).hexdigest()[:12] if system else ""
+        sys_changed = bool(sys_hash) and _last_system_hash.get(key) not in (None, sys_hash)
+        if sys_hash:
+            _last_system_hash[key] = sys_hash
+        u = (data or {}).get("usage") or {}
+        ptd = u.get("prompt_tokens_details") or {}
+        ctd = u.get("completion_tokens_details") or {}
+        choice = ((data or {}).get("choices") or [{}])[0] or {}
+        msg = choice.get("message") or {}
+        entry = {
+            "ts": round(time.time(), 1),
+            "purpose": purpose,
+            "chat": key,
+            "model": (data or {}).get("model") or (payload or {}).get("model") or config.get("model"),
+            "status": status,
+            "ok": bool(data) and not error,
+            "error": str(error)[:120],
+            "attempt": attempt,
+            "iteration": iteration,
+            "note": note,
+            "superseded": bool(superseded),
+            "latency_ms": int(latency * 1000),
+            "prompt_tokens": int(u.get("prompt_tokens") or u.get("input_tokens") or 0),
+            "cached_tokens": int(ptd.get("cached_tokens") or u.get("prompt_cache_hit_tokens") or u.get("cache_read_input_tokens") or 0),
+            "completion_tokens": int(u.get("completion_tokens") or u.get("output_tokens") or 0),
+            "reasoning_tokens": int(ctd.get("reasoning_tokens") or u.get("reasoning_tokens") or 0),
+            "cost": u.get("cost"),
+            "finish": choice.get("finish_reason"),
+            "tool_calls": len(msg.get("tool_calls") or []),
+            "thinking": (payload or {}).get("reasoning") or (payload or {}).get("reasoning_effort") or (payload or {}).get("thinking"),
+            "system_changed": sys_changed,
+            **stats,
+        }
+        day = local_dt().strftime("%Y-%m-%d")
+        with _usage_lock:
+            os.makedirs(USAGE_DIR, exist_ok=True)
+            with open(os.path.join(USAGE_DIR, f"usage-{day}.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logging.debug(f"Usage stats not recorded: {e}")
+
+def raw_llm_call(prompt: str, max_tokens: int = 800, purpose: str = "background") -> str:
+    return raw_llm_call_ex(prompt, max_tokens, purpose=purpose)[0]
 
 # ------------------------------------------------------------------------------
 # Thinking level (reasoning effort). Each provider spells it differently:
@@ -1783,19 +1869,19 @@ def thinking_rejected(level: str, status: int, body: str) -> bool:
                     f"({str(body)[:120]}); using {repr(nxt) if nxt else 'the provider default'} instead.")
     return True
 
-def raw_llm_call_full(prompt: str, max_tokens: int = 1500) -> tuple:
+def raw_llm_call_full(prompt: str, max_tokens: int = 1500, purpose: str = "background") -> tuple:
     """Like raw_llm_call_ex, but when the answer is cut off (thinking models spend part of the
     budget on hidden reasoning) it asks again with a much bigger budget."""
-    text, finish = raw_llm_call_ex(prompt, max_tokens)
+    text, finish = raw_llm_call_ex(prompt, max_tokens, purpose=purpose)
     if finish == "length":
         bigger = min(max_tokens * 4, 16000)
         logging.info(f"Model answer was cut off at {max_tokens} tokens; retrying with {bigger}.")
-        text2, finish2 = raw_llm_call_ex(prompt, bigger)
+        text2, finish2 = raw_llm_call_ex(prompt, bigger, purpose=purpose, note="truncation_retry")
         if text2:
             return text2, finish2
     return text, finish
 
-def raw_llm_call_ex(prompt: str, max_tokens: int = 800) -> tuple:
+def raw_llm_call_ex(prompt: str, max_tokens: int = 800, purpose: str = "background", note: str = "") -> tuple:
     """Returns (text, finish_reason). finish_reason "length" means the answer was cut off."""
     url = get_llm_url()
 
@@ -1807,7 +1893,9 @@ def raw_llm_call_ex(prompt: str, max_tokens: int = 800) -> tuple:
     }
 
     level = thinking_level_for(background=True)
+    attempt = -1
     for _ in range(3):
+        attempt += 1
         payload = {
             "model": config.get("model", "google/gemini-3.8-flash"),
             "messages": [{"role": "user", "content": prompt}],
@@ -1818,27 +1906,41 @@ def raw_llm_call_ex(prompt: str, max_tokens: int = 800) -> tuple:
         payload.update(extra)
         if not REQUESTS_AVAILABLE:
             break
+        t_call = time.time()
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=45)
             if resp.status_code == 200:
                 data = resp.json()
+                record_usage(purpose, data, payload=payload, latency=time.time() - t_call, attempt=attempt, note=note)
                 choice = data.get("choices", [{}])[0]
                 return (choice.get("message", {}).get("content", "") or "").strip(), choice.get("finish_reason")
+            record_usage(purpose, None, payload=payload, latency=time.time() - t_call, attempt=attempt,
+                         status=resp.status_code, error=resp.text[:120], note=note)
             if extra and thinking_rejected(level, resp.status_code, resp.text):
                 continue
         except Exception as e:
+            record_usage(purpose, None, payload=payload, latency=time.time() - t_call, attempt=attempt, status=-1, error=str(e), note=note)
             logging.warning(f"raw_llm_call error via requests: {e}")
         break
 
+    attempt += 1
+    t_call = time.time()
+
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=45) as resp:
-        raw_b = resp.read()
-        if raw_b.startswith(b'\x1f\x8b'):
-            import gzip
-            raw_b = gzip.decompress(raw_b)
-        data = json.loads(raw_b.decode("utf-8", errors="ignore"))
-        choice = data.get("choices", [{}])[0]
-        return (choice.get("message", {}).get("content", "") or "").strip(), choice.get("finish_reason")
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            raw_b = resp.read()
+    except Exception as e:
+        record_usage(purpose, None, payload=payload, latency=time.time() - t_call, attempt=attempt,
+                     status=getattr(e, "code", -1), error=str(e), note=note)
+        raise
+    if raw_b.startswith(b'\x1f\x8b'):
+        import gzip
+        raw_b = gzip.decompress(raw_b)
+    data = json.loads(raw_b.decode("utf-8", errors="ignore"))
+    record_usage(purpose, data, payload=payload, latency=time.time() - t_call, attempt=attempt, note=note)
+    choice = data.get("choices", [{}])[0]
+    return (choice.get("message", {}).get("content", "") or "").strip(), choice.get("finish_reason")
 
 def call_onebot_api(endpoint: str, payload: dict, quiet: bool = False) -> dict:
     url = f"{config['onebot_http_api']}/{endpoint}"
@@ -3896,16 +3998,20 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
         data = {}
         stripped_media = set()
         media_error_text = False
+        usage_purpose = "chat_group" if in_group else ("chat_friend" if session.is_friend else "chat_master")
         for attempt in range(2):
             if not session.is_current(gen_id):
                 return ""
             err_status, err_body = 0, ""
+            t_call = time.time()
             try:
                 if REQUESTS_AVAILABLE:
                     resp = requests.post(url, json=payload, headers=headers, timeout=35)
                     if resp.status_code == 200:
                         try:
                             data = resp.json()
+                            record_usage(usage_purpose, data, session=session, payload=payload, latency=time.time() - t_call,
+                                         iteration=iteration, attempt=attempt, superseded=not session.is_current(gen_id))
                             break
                         except Exception as je:
                             logging.warning(f"LLM call attempt #{attempt+1} JSON decode error on {url}: {je}, body={resp.text[:200]}")
@@ -3920,13 +4026,18 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
                             import gzip
                             raw_bytes = gzip.decompress(raw_bytes)
                         data = json.loads(raw_bytes.decode("utf-8", errors="ignore"))
+                        record_usage(usage_purpose, data, session=session, payload=payload, latency=time.time() - t_call,
+                                     iteration=iteration, attempt=attempt, superseded=not session.is_current(gen_id))
                         break
             except urllib.error.HTTPError as he:
                 err_body = he.read().decode("utf-8", errors="ignore") if he.fp else str(he)
                 err_status = he.code
                 logging.warning(f"LLM call attempt #{attempt+1} failed ({he.code}): {err_body[:200]}")
             except Exception as e:
+                err_body = str(e)
                 logging.warning(f"LLM call attempt #{attempt+1} error: {e}")
+            record_usage(usage_purpose, None, session=session, payload=payload, latency=time.time() - t_call,
+                         iteration=iteration, attempt=attempt, status=err_status or -1, error=err_body or "no data")
 
             if attempt == 0:
                 time.sleep(1.2)
@@ -5586,7 +5697,7 @@ def run_glance(session: ChatSession, fresh: list):
         lines = "\n".join(f"{msg_time_marker(a.get('ts'))}{group_speaker_label(a['uid'], a['name'])} {_indent_continuation(a['text'])}" for a in fresh)
         prompt = (build_group_system_prompt(session) + "\n\n" + current_time_section() + "\n\n" + (GLANCE_RULES_EN if lang == "en" else GLANCE_RULES_ZH)
                   + "\n\n" + L("【群里最近的聊天（你没有被叫到）】", "【Recent group chat (you were not called)】") + "\n" + lines)
-        reply = raw_llm_call(prompt, max_tokens=300) or ""
+        reply = raw_llm_call(prompt, max_tokens=300, purpose="group_glance") or ""
         told = _TELL_MASTER_RE.findall(reply)
         for text in told[:1]:
             notify_master(session, text)
@@ -5988,7 +6099,7 @@ def qzone_react(post: dict):
         + ("\nThis is your Master's post; respond warmly as usual, but remember comments are public." if master_post else "\nDon't comment on everything; only when you really have something to say.")
         + "\nTo comment, output [comment: text] (max 60 words). To like it, output [like]. You can do both. Otherwise output only [skip].")
     try:
-        reply = raw_llm_call(_qzone_prompt_base() + "\n\n" + task, max_tokens=200) or ""
+        reply = raw_llm_call(_qzone_prompt_base() + "\n\n" + task, max_tokens=200, purpose="qzone_react") or ""
     except Exception as e:
         logging.warning(f"[qzone] Model call failed: {e}")
         return
@@ -6119,7 +6230,7 @@ def qzone_random_post():
         + (("Your recent posts:\n" + "\n".join(f"- {t}" for t in recent) + "\n") if recent else "")
         + "Output [post: text] (max 150 words). If you don't really want to post now, output only [NO_REPLY].")
     try:
-        reply = raw_llm_call(_qzone_prompt_base() + "\n\n" + task, max_tokens=300) or ""
+        reply = raw_llm_call(_qzone_prompt_base() + "\n\n" + task, max_tokens=300, purpose="qzone_post") or ""
     except Exception as e:
         logging.warning(f"[qzone] Model call failed: {e}")
         return
@@ -6742,6 +6853,8 @@ def main():
         logging.info(f"[*] Group Storage   : {SESSIONS_DIR}{os.sep}group_<id>{os.sep} (isolated from private memory)")
     else:
         logging.info("[*] Group Chat      : Disabled (set enable_group_chat + group_whitelist in config.json)")
+    if config.get("usage_stats", True):
+        logging.info(f"[*] Usage Stats     : {USAGE_DIR}{os.sep}usage-<date>.jsonl  (summary: python3 usage_report.py)")
     logging.info(f"[*] Memory Mode     : {memory_mode()} " + ("(groups and friend chats share one memory; Master's private memory is separate)" if memory_mode() == "shared" else "(every chat has its own memory)"))
     if friend_chat_enabled():
         f_limit, f_window = _quota_params(type("FriendKind", (), {"is_friend": True})())

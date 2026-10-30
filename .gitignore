@@ -19,6 +19,7 @@ history.json
 chat_history.jsonl
 memory_summary.txt
 memory_backups/
+usage_stats/
 temp_reply.mp3
 temp_mcp_reply.mp3
 *.mp3

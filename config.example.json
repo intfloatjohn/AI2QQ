@@ -10,6 +10,7 @@
   "language": "zh",
   "timezone": "Asia/Shanghai",
   "time_awareness": true,
+  "usage_stats": true,
   "poll_interval_sec": 0.8,
   "debounce_delay_sec": 2.2,
   "max_batch_wait_sec": 10.0,
