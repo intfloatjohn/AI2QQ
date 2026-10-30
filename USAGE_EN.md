@@ -259,6 +259,13 @@ python3 mcp-server/onebot_mcp.py
 * `poll_interval_sec`: Polling interval for new messages (recommended: 0.6 ~ 1.0s).
 * `compact_threshold` / `compact_keep_recent`: Turn threshold for long-term memory summarization.
 * Group chat settings (`enable_group_chat`, `group_whitelist`, ...) are described in [Section 15](#15-group-chat).
+* `thinking_level`: how much the model thinks: `""` (default: not set, the provider decides), `none`, `minimal`, `low`, `medium`, `high`. More thinking means slower replies and more tokens.
+* `thinking_level_background`: thinking level for background work (memory, group glances, Qzone); empty = same as `thinking_level`. `low` is recommended: cheaper and faster.
+* `thinking_api`: how the setting is sent; `auto` (default) decides from `base_url` and `model`:
+  - **OpenRouter** (and proxies with model names like `google/gemini-…`) gets `"reasoning": {"effort": "low"}`.
+  - **DeepSeek** (`api.deepseek.com`) only has on/off: `none` turns thinking off, any other level turns it on.
+  - Other OpenAI-compatible APIs get `"reasoning_effort": "low"`.
+  Set `openrouter`, `deepseek` or `openai` if the guess is wrong. If the model refuses a level (some models don't allow thinking to be turned off), `none` falls back to `low` and other levels fall back to not sending the setting; the log says so once.
 * `onebot_access_token`: if NapCat's HTTP server has a token (e.g. NapCat runs on another machine), put the same value here and the bot sends it as `Authorization: Bearer`.
 
 ---

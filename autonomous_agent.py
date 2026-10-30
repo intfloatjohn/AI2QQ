@@ -144,7 +144,10 @@ config = {
     "group_max_tokens": 800,
     "group_max_bubbles": 3,
     "group_memory_max_chars": 3000,
-    "memory_max_chars": 8000,                 # Private memory size before duplicates are merged (backup kept)
+    "memory_max_chars": 8000,
+    "thinking_level": "",                     # "" = provider default; none / minimal / low / medium / high
+    "thinking_level_background": "",          # Memory, glances, Qzone; "" = same as thinking_level
+    "thinking_api": "auto",                   # auto / openrouter / deepseek / openai (how the setting is sent)                 # Private memory size before duplicates are merged (backup kept)
     "group_log_ambient": True,                # Archive non-trigger messages to the group's own log
     "group_max_file_bytes": 8388608,
 
@@ -1490,6 +1493,73 @@ def model_supports_vision(model_name: str = None) -> bool:
 def raw_llm_call(prompt: str, max_tokens: int = 800) -> str:
     return raw_llm_call_ex(prompt, max_tokens)[0]
 
+# ------------------------------------------------------------------------------
+# Thinking level (reasoning effort). Each provider spells it differently:
+#   OpenRouter (and OpenRouter-style proxies): "reasoning": {"effort": "low"}
+#   DeepSeek:  "thinking": {"type": "enabled" / "disabled"}   (no levels: anything but none = on)
+#   OpenAI-compatible APIs: "reasoning_effort": "low"
+# If a model refuses the setting (e.g. "reasoning is mandatory"), "none" falls back to "low",
+# and anything else falls back to sending nothing; the fallback is remembered per model.
+# ------------------------------------------------------------------------------
+THINKING_LEVELS = ("none", "minimal", "low", "medium", "high")
+_thinking_fallback = {}
+
+def _norm_thinking_level(level) -> str:
+    level = str(level or "").strip().lower()
+    aliases = {"off": "none", "disabled": "none", "false": "none", "0": "none", "max": "high", "on": "medium", "true": "medium"}
+    level = aliases.get(level, level)
+    return level if level in THINKING_LEVELS else ""
+
+def thinking_api_style() -> str:
+    style = str(config.get("thinking_api", "auto") or "auto").strip().lower()
+    if style in ("openrouter", "deepseek", "openai"):
+        return style
+    base = str(config.get("base_url", "")).lower()
+    model = str(config.get("model", "")).lower()
+    if "deepseek.com" in base:
+        return "deepseek"
+    if "openrouter" in base or "/" in model:
+        return "openrouter"
+    return "openai"
+
+def thinking_level_for(background: bool = False) -> str:
+    if background:
+        bg = _norm_thinking_level(config.get("thinking_level_background"))
+        if bg:
+            return bg
+    return _norm_thinking_level(config.get("thinking_level"))
+
+def thinking_params(level: str) -> dict:
+    """Extra request fields for this thinking level ({} = leave it to the provider)."""
+    level = _norm_thinking_level(level)
+    if not level:
+        return {}
+    level = _thinking_fallback.get((config.get("model", ""), level), level)
+    if not level:
+        return {}
+    style = thinking_api_style()
+    if style == "deepseek":
+        return {"thinking": {"type": "disabled" if level == "none" else "enabled"}}
+    if style == "openrouter":
+        return {"reasoning": {"effort": level}}
+    return {"reasoning_effort": level}
+
+def thinking_rejected(level: str, status: int, body: str) -> bool:
+    """Call when a request carrying thinking_params failed. Records a fallback and returns True
+    if the request should be retried."""
+    level = _norm_thinking_level(level)
+    if not level or not (400 <= int(status or 0) < 500) or status in (401, 403, 429):
+        return False
+    key = (config.get("model", ""), level)
+    current = _thinking_fallback.get(key, level)
+    if current == "":
+        return False
+    nxt = "low" if current == "none" else ""
+    _thinking_fallback[key] = nxt
+    logging.warning(f"The API refused thinking level '{current}' for model {config.get('model')} "
+                    f"({str(body)[:120]}); using {repr(nxt) if nxt else 'the provider default'} instead.")
+    return True
+
 def raw_llm_call_full(prompt: str, max_tokens: int = 1500) -> tuple:
     """Like raw_llm_call_ex, but when the answer is cut off (thinking models spend part of the
     budget on hidden reasoning) it asks again with a much bigger budget."""
@@ -1513,22 +1583,29 @@ def raw_llm_call_ex(prompt: str, max_tokens: int = 800) -> tuple:
         "X-Title": "QQ AI Companion Memory"
     }
 
-    payload = {
-        "model": config.get("model", "google/gemini-3.8-flash"),
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.4,
-        "max_tokens": max_tokens
-    }
-
-    if REQUESTS_AVAILABLE:
+    level = thinking_level_for(background=True)
+    for _ in range(3):
+        payload = {
+            "model": config.get("model", "google/gemini-3.8-flash"),
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.4,
+            "max_tokens": max_tokens
+        }
+        extra = thinking_params(level)
+        payload.update(extra)
+        if not REQUESTS_AVAILABLE:
+            break
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=45)
             if resp.status_code == 200:
                 data = resp.json()
                 choice = data.get("choices", [{}])[0]
                 return (choice.get("message", {}).get("content", "") or "").strip(), choice.get("finish_reason")
+            if extra and thinking_rejected(level, resp.status_code, resp.text):
+                continue
         except Exception as e:
             logging.warning(f"raw_llm_call error via requests: {e}")
+        break
 
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=45) as resp:
@@ -3525,6 +3602,8 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
             "temperature": 0.72,
             "max_tokens": max_tokens_val
         }
+        chat_thinking = thinking_level_for(background=False)
+        payload.update(thinking_params(chat_thinking))
         if not is_final_turn and tools:
             payload["tools"] = tools
 
@@ -3579,14 +3658,19 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
                         clean_msgs.append(m)
                 # The API refused the request and it carried pictures/voice: retry without them.
                 if 400 <= err_status < 500 and err_status not in (401, 403, 429):
-                    clean_msgs, stripped_media = strip_media_from_messages(clean_msgs)
-                    media_error_text = bool(_MEDIA_ERROR_RE.search(err_body or ""))
+                    if any(k in payload for k in ("reasoning", "reasoning_effort", "thinking")) and \
+                            re.search(r'reason|thinking|effort', err_body or "", re.IGNORECASE):
+                        thinking_rejected(chat_thinking, err_status, err_body)
+                    else:
+                        clean_msgs, stripped_media = strip_media_from_messages(clean_msgs)
+                        media_error_text = bool(_MEDIA_ERROR_RE.search(err_body or ""))
                 payload = {
                     "model": model_name,
                     "messages": clean_msgs,
                     "temperature": 0.72,
                     "max_tokens": max_tokens_val
                 }
+                payload.update(thinking_params(chat_thinking))
                 continue
             else:
                 break
@@ -5883,6 +5967,9 @@ def main():
     logging.info("      QQ AI Companion Daemon (Bilingual & Multi-Modal Edition)")
     logging.info("=" * 65)
     logging.info(f"[*] Model           : {config.get('model')}")
+    _tl = thinking_level_for(False) or "provider default"
+    _tb = thinking_level_for(True) or "provider default"
+    logging.info(f"[*] Thinking Level  : chat {_tl}, background {_tb} (sent as {thinking_api_style()})")
     logging.info(f"[*] Model Vision    : {'Enabled (Multimodal)' if model_supports_vision() else 'Disabled (Text-only model; graceful degradation active)'}")
     logging.info(f"[*] Target User QQ  : {config.get('master_qq')}")
     logging.info(f"[*] Language Mode   : {config.get('language')}")

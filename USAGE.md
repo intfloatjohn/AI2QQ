@@ -259,6 +259,13 @@ python3 mcp-server/onebot_mcp.py
 * `poll_interval_sec`: 消息轮询间隔（推荐 0.6 ~ 1.0 秒）。
 * `compact_threshold` / `compact_keep_recent`: 对话长期记忆压缩阈值与保留轮数。
 * 群聊相关参数（`enable_group_chat`、`group_whitelist` 等）见 [第 15 节](#15-群聊模式-group-chat)。
+* `thinking_level`: 模型思考程度：`""`（默认，不设置，由服务商决定）、`none`、`minimal`、`low`、`medium`、`high`。思考越多回复越慢、越费 token。
+* `thinking_level_background`: 后台任务（整理记忆、旁观群聊、QQ空间）的思考程度，留空就和 `thinking_level` 一样。推荐 `low`，省钱也更快。
+* `thinking_api`: 这个设置怎么发给服务商，默认 `auto` 自动判断：
+  - **OpenRouter**（以及模型名像 `google/gemini-…` 的中转站）发 `"reasoning": {"effort": "low"}`；
+  - **DeepSeek**（`api.deepseek.com`）只有开和关：`none` 关闭思考，其它级别都是开启；
+  - 其它 OpenAI 兼容接口发 `"reasoning_effort": "low"`。
+  判断错了可以手动设为 `openrouter`、`deepseek` 或 `openai`。如果模型不接受某个级别（比如有的模型不允许关闭思考），`none` 会自动改用 `low`，其它级别会改为不设置，并在日志里提示一次。
 * `onebot_access_token`: 如果给 NapCat 的 HTTP 服务设置了 token（例如 NapCat 不在本机运行时），在这里填同一个值，机器人会带上 `Authorization: Bearer` 请求头。
 
 ---
