@@ -3190,6 +3190,16 @@ def execute_action_tags(session: ChatSession, reply_text: str, ctx: dict = None)
         for text in _TELL_MASTER_RE.findall(reply_text)[:1]:
             notify_master(session, text)
 
+    # 8a. Qzone text tags (same permission checks as the qzone tools)
+    if qzone_enabled() and (session.is_group or session.is_master_private):
+        for text in _QZ_TAG_POST_RE.findall(reply_text)[:1]:
+            logging.info(f"Inline Qzone post [{session.key}]: {execute_qzone_tool(session, 'qzone_post', {'text': text}, ctx)}")
+        if session.is_master_private:
+            for did in _QZ_TAG_PUBLISH_RE.findall(reply_text)[:2]:
+                logging.info(f"Inline Qzone publish draft: {execute_qzone_tool(session, 'qzone_post', {'draft_id': did.strip()}, ctx)}")
+            for did in _QZ_TAG_DISCARD_RE.findall(reply_text)[:3]:
+                logging.info(f"Inline Qzone discard draft: {execute_qzone_tool(session, 'qzone_discard_draft', {'draft_id': did.strip()}, ctx)}")
+
     # 8b. Visibility of pictures in group chats (Master's private chat only)
     if session.is_master_private:
         for v_target in re.findall(r'\[(?:公开图片|公开表情|PUBLIC_PICTURE|public_picture):\s*([^\]]+)\]', reply_text, re.IGNORECASE):
@@ -3232,6 +3242,7 @@ def clean_tags(reply_text: str) -> str:
     text = re.sub(r'\[(?:媒体记录|MEDIA_NOTE|media_note)[^\]]*\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:告诉主人|私聊主人|tell_master|Tell Master|message_master):[^\]]*\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:查看媒体|重看媒体|review_media|Review Media):[^\]]*\]', '', text, flags=re.IGNORECASE)
+    text = _QZ_ANY_TAG_RE.sub('', text)
     text = re.sub(r'\[(?:NO_REPLY|no_reply|SILENCE|silence)\]', '', text, flags=re.IGNORECASE)
     return text.strip()
 
@@ -3381,6 +3392,8 @@ def build_group_system_prompt(session: ChatSession) -> str:
     lang = config.get("language", "zh").lower()
     group_label = sanitize_display_name(session.group_name or str(session.target_id), 40)
     rules = GROUP_CORE_RULES_EN if lang == "en" else GROUP_CORE_RULES_ZH
+    if qzone_enabled():
+        rules = rules + "\n" + (QZONE_GROUP_RULE_EN if lang == "en" else QZONE_GROUP_RULE_ZH)
     parts = [
         redact_master_qq(load_system_prompt()),
         rules.replace("{group}", group_label),
@@ -3700,8 +3713,10 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
         if session.is_master_private:
             inline_group_recall = re.search(r'\[(?:查看群聊|群聊回忆|group_recall|Group Recall)(?::\s*([^\]]*))?\]', raw_reply, re.IGNORECASE)
 
+        inline_qzone_read = _QZ_TAG_READ_RE.search(raw_reply) if (session.is_master_private and qzone_enabled()) else None
+
         has_native_tools = bool(tool_calls) and not is_final_turn
-        has_inline_cmds = bool(inline_search or inline_chat_search or inline_read_mem or inline_list_pics or inline_group_recall or inline_review) and not is_final_turn
+        has_inline_cmds = bool(inline_search or inline_chat_search or inline_read_mem or inline_list_pics or inline_group_recall or inline_review or inline_qzone_read) and not is_final_turn
 
         # Memory tags inside an intermediate step are saved now. Tags in the final reply are saved by
         # execute_action_tags once the reply is confirmed, so each fact is written exactly once.
@@ -3785,6 +3800,10 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
 
             for media_id in inline_review[:2]:
                 obs_lines.append(review_group_media(session, media_id.strip(), ctx))
+            if inline_qzone_read:
+                q_arg = (inline_qzone_read.group(1) or "").strip()
+                logging.info(f"Executing Inline Command: [Read Qzone: {q_arg}]")
+                obs_lines.append(f"【Qzone】:\n{execute_qzone_tool(session, 'qzone_read', {'qq': q_arg}, ctx)}")
             messages.append({"role": "assistant", "content": raw_reply})
             hint_str = "【System: Tool Observations】\n" + "\n\n".join(obs_lines) + "\nPlease reply naturally to the user based on these retrieved observations."
             if ctx.get("pending_media"):
@@ -5311,6 +5330,18 @@ QZONE_RULES_EN = """【Qzone Rules】Qzone is public: all of your QQ friends can
 _QZ_COMMENT_RE = re.compile(r'\[(?:评论|comment):\s*([^\]]+)\]', re.IGNORECASE)
 _QZ_LIKE_RE = re.compile(r'\[(?:点赞|like)\]', re.IGNORECASE)
 _QZ_POST_RE = re.compile(r'\[(?:说说|发说说|post):\s*([^\]]+)\]', re.IGNORECASE)
+# Text-tag versions of the Qzone tools, for models that don't call tools reliably
+_QZ_TAG_POST_RE = re.compile(r'\[(?:发说说|发空间|qzone_post|Post Qzone|post_qzone):\s*([^\]]+)\]', re.IGNORECASE)
+_QZ_TAG_PUBLISH_RE = re.compile(r'\[(?:发布草稿|同意草稿|publish_draft|Publish Draft):\s*([^\]]+)\]', re.IGNORECASE)
+_QZ_TAG_DISCARD_RE = re.compile(r'\[(?:放弃草稿|discard_draft|Discard Draft):\s*([^\]]+)\]', re.IGNORECASE)
+_QZ_TAG_READ_RE = re.compile(r'\[(?:看空间|查看空间|read_qzone|Read Qzone)(?::\s*([^\]]*))?\]', re.IGNORECASE)
+_QZ_ANY_TAG_RE = re.compile(r'\[(?:发说说|发空间|qzone_post|Post Qzone|post_qzone|发布草稿|同意草稿|publish_draft|Publish Draft|'
+                            r'放弃草稿|discard_draft|Discard Draft|看空间|查看空间|read_qzone|Read Qzone)(?::[^\]]*)?\]', re.IGNORECASE)
+QZONE_GROUP_RULE_ZH = ("7. QQ空间：有人请你发QQ空间说说时，用 qzone_post 工具（或写 [发说说: 内容]）。主人本人请求会直接发出；"
+                       "其他群友请求的只会变成草稿，先私聊发给主人确认，要如实告诉对方“已经交给主人确认了”。空间是公开的，不要写主人或群友的隐私。")
+QZONE_GROUP_RULE_EN = ("7. Qzone: when someone asks you to post on Qzone, use the qzone_post tool (or write [post_qzone: text]). The Master's own "
+                       "requests are posted directly; other members' requests only become drafts sent to your Master for approval, so tell them "
+                       "honestly it is waiting for your Master. Qzone is public: don't include anyone's private matters.")
 
 def qzone_enabled() -> bool:
     return (bool(config.get("enable_qzone", False)) and QZONE_AVAILABLE
@@ -5430,6 +5461,8 @@ def qzone_summary_for_master() -> str:
         acts = list(st["activity"])[-8:]
     lines = [L("【QQ空间】你可以用 qzone_* 工具看说说、发说说、评论。你自己想发的和群友请你发的说说都是草稿，主人同意后才用 qzone_post（填 draft_id）发出。",
                "【Qzone】Use the qzone_* tools to read posts, post and comment. Posts you want to write yourself and posts group members ask for are drafts; publish them with qzone_post (draft_id) only after your Master agrees.")]
+    lines.append(L("如果不方便用工具，也可以在回复里写：[看空间]（看主人的）/ [看空间: QQ号] / [看空间: 我]、[发说说: 内容]、[发布草稿: D3]、[放弃草稿: D3]。",
+                   "If you can't use tools, write these in your reply instead: [read_qzone] (Master's) / [read_qzone: QQ] / [read_qzone: me], [post_qzone: text], [publish_draft: D3], [discard_draft: D3]."))
     if drafts:
         lines.append(L("等主人确认的草稿：", "Drafts waiting for your Master:"))
         for did, d in drafts:

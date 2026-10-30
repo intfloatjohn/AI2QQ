@@ -72,3 +72,19 @@ In a group, every tool acts on that group only. Permissions are checked by the p
 Master's private chat only:
 - `[group_recall: group ID or keyword]` / `recall_group_chat`: recall what happened in groups (group content flows one way, into private chat).
 - `[PUBLIC_PICTURE: target]` / `[PRIVATE_PICTURE: target]`: choose whether a picture may be used in groups (photos default to private, stickers to public).
+
+## 6. Qzone (needs `enable_qzone`)
+
+Qzone is visible to all QQ friends; permissions are checked by the program using real QQ IDs. Every tag has a matching tool; the model may use either.
+
+Master's private chat:
+- `[read_qzone]` / `[read_qzone: QQ]` / `[read_qzone: me]` ↔ `qzone_read`: read the recent posts and comments of the Master, a friend, or the bot itself (fed back to the model as untrusted content).
+- `[post_qzone: text]` ↔ `qzone_post`: posts directly when the Master asks.
+- `[publish_draft: D3]` ↔ `qzone_post` with `draft_id`: posts a draft once the Master agrees; to change the text, use the tool and pass the new text too.
+- `[discard_draft: D3]` ↔ `qzone_discard_draft`: drop a draft the Master doesn't want.
+- `qzone_comment` (tool only): comment on a post when the Master asks; post IDs come from `qzone_read`.
+
+Groups:
+- `[post_qzone: text]` ↔ `qzone_post`: the Master's own requests are posted directly; other members' requests only become drafts sent to the Master for approval. Groups can't publish or discard drafts or read Qzone.
+
+Background (no tags needed): browsing and commenting/liking on a schedule, and now and then a draft of its own sent to the Master.
