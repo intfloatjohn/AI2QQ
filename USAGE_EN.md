@@ -23,6 +23,7 @@ This project is a high-performance, lightweight, 24/7 autonomous QQ AI companion
 14. [Windows One-Click Setup & Startup](#14-windows-one-click-setup--startup)
 15. [Group Chat](#15-group-chat)
 16. [Qzone (experimental)](#16-qzone-experimental)
+17. [Friend Chat](#17-friend-chat)
 
 ---
 
@@ -495,3 +496,36 @@ The bot can use QQ Zone (QQ空间): read the Master's and friends' posts, commen
 | `qzone_draft_expire_hours` | `24` | Unanswered drafts expire after this |
 
 State is kept in `sessions/qzone/state.json` (seen posts, drafts, recent activity). Text only for now; pictures will come later.
+
+---
+
+## 17. Friend Chat
+
+Besides the Master, the bot can chat privately with other QQ friends. Off by default; turn it on with `"enable_friend_chat": true` in `config.json`. Like group chats, these chats are treated as public and untrusted.
+
+### 17.1 Rules
+- **Who**: all of the bot's QQ friends except the QQ numbers in `friend_blacklist`. The Master's own private chat is unaffected.
+- **Identity by QQ number only**: someone saying they are the Master or an admin changes nothing; only the Master's QQ number is the Master.
+- **Separate memory**: each friend has their own folder `sessions/private_<QQ>/` (memory, chat log, message counter). The Master's private memory never appears in these chats, and friends can't see each other's.
+- **Message limit**: each friend can trigger at most `private_member_msg_limit` replies per 24 hours (counted separately from groups). If the setting is missing, 50 is used and a WARNING is logged; `0` = unlimited. Ignored messages are logged; `private_member_limit_notice` can set a one-time notice (none by default).
+- **What it can do**: web search, search/remember this chat's own memory, send public stickers. It can't modify or delete pictures or save the friend's pictures into the library. Qzone post requests only become drafts for the Master.
+- **Telling the Master**: if something matters, it can message the Master privately (e.g. `[private chat with Li (QQ:123)] …`), sharing the hourly cap with groups.
+- **Master recall**: in the Master's private chat, "what did you talk about with Li?" uses `[friend_recall: QQ or name]` / `recall_friend_chat` (read-only).
+- Off in single-account mode (`bot_qq == master_qq`), where the bot would be answering the Master's friends as the Master.
+
+### 17.2 Finding new messages
+- Uses NapCat's recent contacts (`get_recent_contact`) every 3 seconds and only reads chats that changed.
+- If NapCat doesn't support it, checks 5 friends per round in turn (`friend_poll_batch`).
+- Messages older than 3 minutes at startup are not answered.
+
+### 17.3 Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `enable_friend_chat` | `false` | Main switch |
+| `friend_blacklist` | `[]` | QQ numbers never answered |
+| `private_member_msg_limit` | `50` if unset (with a warning) | Replies per friend per window; `0` = unlimited |
+| `private_member_limit_window_sec` | `86400` | Counting window; `0` = never resets |
+| `private_member_limit_notice` | `""` | One-time notice when a friend hits the limit |
+| `friend_poll_interval_sec` | `3` | How often to check for new messages |
+| `friend_poll_batch` | `5` | Friends checked per round when recent contacts aren't available |

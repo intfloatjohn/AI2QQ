@@ -89,3 +89,15 @@ Groups:
 - `[post_qzone: text]` ↔ `qzone_post`: the Master's own requests are posted directly; other members' requests only become drafts sent to the Master for approval. Groups can't publish or discard drafts or read Qzone.
 
 Background (no tags needed): browsing and commenting/liking on a schedule, and now and then a draft of its own sent to the Master.
+
+
+## 7. Friend Chat (needs `enable_friend_chat`)
+
+In private chats with QQ friends other than the Master, the rules match group chats and are checked by real QQ ID:
+- `[remember: ...]`, `[read_memory]`, `[search_history: ...]`: only this friend's chat.
+- `[PICTURE: ...]`: public stickers only; saving, modifying or deleting pictures has no effect.
+- `[tell_master: ...]` / `message_master`: tells the Master privately; the friend can't see it (hourly cap).
+- `[post_qzone: ...]`: only becomes a draft for the Master.
+
+Master's private chat only:
+- `[friend_recall: QQ or name]` / `recall_friend_chat`: recall your private chats with other friends (read-only, untrusted content).
