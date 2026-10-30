@@ -83,7 +83,7 @@ Master's private chat:
 - `[post_qzone: text]` ↔ `qzone_post`: posted directly only when the Master's own message in this turn asks for a post (e.g. "post this on Qzone"; Chinese requests work too); otherwise it becomes a draft for the Master. The program checks the Master's actual words (not quoted text), not what the model says.
 - `[publish_draft: D3]` ↔ `qzone_post` with `draft_id`: posted only if the Master's message approves it (ok / yes / sure / go ahead / post it…, with no no / don't / cancel / wait / not yet; Chinese works too); a changed text becomes a new draft for the Master to approve.
 - `[discard_draft: D3]` ↔ `qzone_discard_draft`: drop a draft the Master doesn't want.
-- `[comment_qzone: post_id=ID, text=comment]` ↔ `qzone_comment`: comment on a post; the ID comes from `qzone_read` (the part after #). The author is found from posts read earlier, or add `qq=QQ`.
+- `[comment_qzone: post ID: comment]` ↔ `qzone_comment`: comment on a post; the ID comes from `qzone_read` (the part after #). The author is found from posts read earlier, or add `qq=QQ`.
 
 Groups:
 - `[post_qzone: text]` ↔ `qzone_post`: the Master's own requests are posted directly; other members' requests only become drafts sent to the Master for approval. Groups can't publish or discard drafts or read Qzone.

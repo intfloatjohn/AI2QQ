@@ -2398,7 +2398,7 @@ def get_picture_database_summary(session: ChatSession, max_items: int = 15) -> s
         else:
             instructions = (
                 "图库管理权限（你拥有完全的增删改查自主管理权）：\n"
-                "- 发送图片: [发图: 关键词] 或 [PICTURE: 关键词]\n"
+                "- 发送图片: [发图: 关键词]\n"
                 "- 存新表情: [收藏表情: 标签: 描述]\n"
                 "- 修改已有图片: [修改图片: 目标原标签或ID: 新标签: 新描述] 或调用 modify_picture 工具\n"
                 "- 删除已有图片: [删除图片: 目标原标签或ID] 或调用 delete_picture 工具\n"
@@ -3565,7 +3565,276 @@ def execute_action_tags(session: ChatSession, reply_text: str, ctx: dict = None)
         else:
             logging.warning(f"Custom picture/sticker not found in library for query: '{p_query}' ({session.key})")
 
+# ---------------------------------------------------------------- tag normalisation
+# Every action has ONE canonical text form: [名称: 内容] with ASCII brackets and colon. Whatever the
+# model writes (full-width colon, 【】 brackets, a tool call written out as text, a known alias) is
+# turned into that form before anything reads the reply, so tools and tags always end in the same
+# code. Unknown command-like tags are removed and logged instead of being sent to QQ.
+_TAG_NAMES = [
+    "发贴图", "Send Sticker", "Sticker", "发表情", "Send Face", "Face", "Emoji", "发语音", "Send Voice", "Voice",
+    "PICTURE", "IMAGE", "发图", "发照片",
+    "收藏表情", "保存表情", "添加表情", "收藏图片", "保存图片", "SAVE_STICKER",
+    "查看图库", "查看表情包", "浏览图库", "LIST_PICTURES",
+    "修改图片", "修改表情", "更新图片", "更新表情", "MODIFY_PICTURE",
+    "删除图片", "删除表情", "移除图片", "移除表情", "DELETE_PICTURE",
+    "公开图片", "公开表情", "PUBLIC_PICTURE", "私密图片", "私密表情", "PRIVATE_PICTURE",
+    "互动", "Interact", "poke", "like",
+    "更新记忆", "Update Memory", "update_memory", "remember", "查看记忆", "Read Memory", "read_memory", "Memory",
+    "搜索聊天记录", "Search History", "search_history", "history", "搜索", "Search", "web_search",
+    "查看群聊", "群聊回忆", "group_recall", "Group Recall", "媒体记录", "MEDIA_NOTE", "media_note",
+    "告诉主人", "私聊主人", "tell_master", "Tell Master", "message_master",
+    "查看媒体", "重看媒体", "review_media", "Review Media",
+    "发说说", "发空间", "qzone_post", "Post Qzone", "post_qzone", "发布草稿", "同意草稿", "publish_draft", "Publish Draft",
+    "放弃草稿", "discard_draft", "Discard Draft", "看空间", "查看空间", "read_qzone", "Read Qzone",
+    "评论说说", "评论空间", "空间评论", "评论", "qzone_comment", "comment_qzone", "Comment Qzone", "Comment Post", "comment",
+    "查看私聊", "私聊回忆", "friend_recall", "Friend Recall",
+    "NO_REPLY", "SILENCE",
+]
+# Names models invent for things that exist -> the canonical name
+_TAG_ALIASES = {
+    "发布说说": "发说说", "发送说说": "发说说", "写说说": "发说说", "发动态": "发说说", "发空间动态": "发说说",
+    "发朋友圈": "发说说", "发QQ空间": "发说说", "发表说说": "发说说",
+    "评论动态": "评论说说", "回复说说": "评论说说",
+    "看说说": "看空间", "查看说说": "看空间", "读空间": "看空间", "逛空间": "看空间",
+    "记住": "更新记忆", "记下": "更新记忆", "记忆": "更新记忆", "保存记忆": "更新记忆", "写入记忆": "更新记忆",
+    "读取记忆": "查看记忆", "回忆": "查看记忆",
+    "通知主人": "告诉主人", "报告主人": "告诉主人", "发消息给主人": "告诉主人", "提醒主人": "告诉主人",
+    "联网搜索": "搜索", "网络搜索": "搜索", "上网搜索": "搜索", "查询": "搜索",
+    "发送图片": "发图", "发图片": "发图", "发送照片": "发图",
+    "发送贴图": "发贴图", "发送语音": "发语音",
+    "戳一戳": "poke", "戳": "poke", "点赞": "like",
+    "不回复": "NO_REPLY",
+}
+_NO_BODY_ALIASES = {"poke", "like", "NO_REPLY", "查看记忆"}   # these never take content
+# Tags that are complete without content; any other tag with nothing after the colon is dropped
+_TAG_NO_BODY_OK = {n.lower() for n in (
+    "poke", "like", "NO_REPLY", "SILENCE", "查看记忆", "Read Memory", "read_memory", "Memory",
+    "查看图库", "查看表情包", "浏览图库", "LIST_PICTURES", "查看群聊", "群聊回忆", "group_recall", "Group Recall",
+    "看空间", "查看空间", "read_qzone", "Read Qzone", "查看私聊", "私聊回忆", "friend_recall", "Friend Recall",
+    "媒体记录", "MEDIA_NOTE", "media_note")}
+
+# Tool (function) name -> canonical tag, so a tool call written out as text runs like a tag
+def _tool_call_to_tag(name: str, args: dict) -> str:
+    def a(*keys):
+        for k in keys:
+            v = args.get(k)
+            if v not in (None, "", [], {}):
+                if isinstance(v, (list, tuple)):
+                    v = "，".join(str(x) for x in v)
+                return str(v).replace("]", "］").replace("[", "［").strip()
+        return ""
+    n = (name or "").strip()
+    if n == "web_search":             return f"[搜索: {a('query', 'q', 'keyword')}]"
+    if n == "search_chat_history":    return f"[搜索聊天记录: {a('query', 'keyword')}]"
+    if n == "read_memory":            return "[查看记忆]"
+    if n == "update_memory":          return f"[更新记忆: {a('content', 'fact', 'text', 'memory')}]"
+    if n in ("search_picture_library", "list_pictures"):
+        q = a("query", "filter_query", "keyword")
+        return f"[查看图库: {q}]" if q else "[查看图库]"
+    if n == "modify_picture":
+        return f"[修改图片: {a('target')}: {a('new_tags', 'tags')}: {a('new_summary', 'summary')}]"
+    if n == "delete_picture":         return f"[删除图片: {a('target')}]"
+    if n == "recall_group_chat":
+        g = a("group", "query")
+        return f"[查看群聊: {g}]" if g else "[查看群聊]"
+    if n == "review_media":           return f"[查看媒体: {a('media_id', 'id')}]"
+    if n == "message_master":         return f"[告诉主人: {a('text', 'message', 'content')}]"
+    if n == "qzone_post":
+        did = a("draft_id")
+        return f"[发布草稿: {did}]" if did else f"[发说说: {a('text', 'content')}]"
+    if n == "qzone_discard_draft":    return f"[放弃草稿: {a('draft_id', 'id')}]"
+    if n == "qzone_read":
+        q = a("qq", "who")
+        return f"[看空间: {q}]" if q else "[看空间]"
+    if n == "qzone_comment":
+        qq = a("qq")
+        pid, txt = a('post_id', 'id', 'tid'), a('text', 'comment', 'content')
+        return f"[评论说说: qq={qq}, post_id={pid}, text={txt}]" if qq else f"[评论说说: {pid}: {txt}]"
+    if n == "recall_friend_chat":
+        w = a("who", "qq", "query")
+        return f"[查看私聊: {w}]" if w else "[查看私聊]"
+    return ""
+
+_TOOL_FIRST_ARG = {
+    "web_search": ["query"], "search_chat_history": ["query"], "update_memory": ["content"],
+    "search_picture_library": ["query"], "list_pictures": ["filter_query"], "modify_picture": ["target", "new_tags", "new_summary"],
+    "delete_picture": ["target"], "recall_group_chat": ["group"], "review_media": ["media_id"], "message_master": ["text"],
+    "qzone_post": ["text"], "qzone_discard_draft": ["draft_id"], "qzone_read": ["qq"], "qzone_comment": ["post_id", "text"],
+    "recall_friend_chat": ["who"], "read_memory": [],
+}
+
+def _parse_call_args(name: str, raw: str) -> dict:
+    """Arguments of a call written as text: JSON object, k=v pairs, or positional values."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            v = json.loads(raw)
+            return v if isinstance(v, dict) else {}
+        except Exception:
+            pass
+    unq = lambda v: v.strip().strip('"\'“”').strip()
+    if re.match(r'\w+\s*[=:：]', raw):
+        out = {}
+        for part in re.split(r'\s*[,，]\s*(?=\w+\s*[=:：])', raw):      # split only before the next key
+            m = re.match(r'(\w+)\s*[=:：]\s*(.*)$', part, re.DOTALL)
+            if m:
+                out[m.group(1)] = unq(m.group(2))
+        return out
+    keys = _TOOL_FIRST_ARG.get(name, [])
+    if not keys:
+        return {}
+    vals = re.split(r'\s*[,，]\s*', raw, maxsplit=len(keys) - 1) if len(keys) > 1 else [raw]
+    return dict(zip(keys, [unq(v) for v in vals]))
+
+def _known_tool_names() -> set:
+    return set(_TOOL_FIRST_ARG)
+
+_TAG_NAME_RES = {}
+def _tag_name_res():
+    if not _TAG_NAME_RES:
+        names = sorted(set(_TAG_NAMES) | set(_TAG_ALIASES) | _known_tool_names(), key=len, reverse=True)
+        alt = "|".join(re.escape(n) for n in names)
+        # [名称：内容] / 【名称: 内容】 / [名称 (内容)] / [名称()] ... with a known name
+        _TAG_NAME_RES["tag"] = re.compile(
+            r'[\[【［]\s*(' + alt + r')\s*(?:(?:[:：]\s*([^\]】］\n]*?))|(?:\(\s*([^\]】］\n]*?)\s*\)))?\s*[\]】］]', re.IGNORECASE)
+        _TAG_NAME_RES["lower"] = {n.lower(): n for n in _TAG_NAMES}
+        _TAG_NAME_RES["alias"] = {k.lower(): v for k, v in _TAG_ALIASES.items()}
+    return _TAG_NAME_RES
+
+# Canonical tag -> the tool behind it (used when a tag body is written as key=value arguments)
+_TAG_TOOL = {
+    "搜索": "web_search", "搜索聊天记录": "search_chat_history", "更新记忆": "update_memory", "告诉主人": "message_master",
+    "发说说": "qzone_post", "发布草稿": "qzone_post", "放弃草稿": "qzone_discard_draft", "看空间": "qzone_read",
+    "查看私聊": "recall_friend_chat", "查看群聊": "recall_group_chat", "查看媒体": "review_media",
+    "删除图片": "delete_picture", "修改图片": "modify_picture", "查看图库": "list_pictures",
+}
+
+_TOOL_JSON_START_RE = re.compile(r'\{\s*"(?:name|tool|tool_name|function|type)"\s*:')
+_UNKNOWN_TAG_RE = re.compile(r'\[\s*([A-Za-z][A-Za-z0-9_]{1,30}|[一-鿿]{1,8})\s*(?:[:：]\s*[^\]\n]+|\([^\]\n]*\))\]')
+
+def _json_tool_call(obj):
+    """{"name": ..., "arguments": {...}} / {"type":"function","function":{...}} -> (name, args) or None."""
+    if not isinstance(obj, dict):
+        return None
+    if isinstance(obj.get("function"), dict):
+        obj = obj["function"]
+    name = obj.get("name") or obj.get("tool") or obj.get("tool_name") or (obj.get("function") if isinstance(obj.get("function"), str) else None)
+    if not isinstance(name, str):
+        return None
+    args = obj.get("arguments", obj.get("parameters", obj.get("args", obj.get("input", {}))))
+    if isinstance(args, str):
+        try:
+            args = json.loads(args) if args.strip() else {}
+        except Exception:
+            args = {}
+    return name, (args if isinstance(args, dict) else {})
+
+def normalize_model_tags(text: str, log: bool = True) -> str:
+    """Rewrites every action the model wrote into the canonical [名称: 内容] form (see above)."""
+    if not text or ("[" not in text and "【" not in text and "［" not in text and "{" not in text and "<" not in text
+                    and "(" not in text):
+        return text or ""
+    tools = _known_tool_names()
+
+    def leaked(name, args, original):
+        tag = _tool_call_to_tag(name, args) if name in tools else ""
+        if log:
+            if tag:
+                logging.warning(f"Model wrote a tool call as text; running it as {tag[:80]}")
+            else:
+                logging.warning(f"Model wrote an unknown tool call as text; removed: {original[:100]}")
+        return tag
+
+    # 1a. <tool_call>{...}</tool_call>, <function_call>..., DeepSeek's special tool-call tokens
+    def _xml(m):
+        try:
+            obj = json.loads(m.group(2))
+        except Exception:
+            obj = None
+        call = _json_tool_call(obj)
+        return leaked(call[0], call[1], m.group(0)) if call else leaked("", {}, m.group(0))
+    text = re.sub(r'<(tool_call|function_call|tool_use|invoke)>\s*(\{.*?\})\s*(?:</\1>|$)', _xml, text, flags=re.DOTALL)
+    text = re.sub(r'<｜tool▁sep｜>\s*(\w+)\s*```(?:json)?\s*(\{.*?\})\s*```',
+                  lambda m: leaked(m.group(1), _parse_call_args(m.group(1), m.group(2)), m.group(0)), text, flags=re.DOTALL)
+    text = re.sub(r'<｜tool▁[a-z▁]+｜>(?:function)?', '', text)
+    # 1b. JSON objects that are tool calls (fenced or bare)
+    def _fenced(m):
+        try:
+            obj = json.loads(m.group(1))
+        except Exception:
+            return m.group(0)
+        calls = obj if isinstance(obj, list) else [obj]
+        parsed = [_json_tool_call(o) for o in calls]
+        if not parsed or not all(parsed):
+            return m.group(0)
+        return "".join(leaked(n, a, m.group(0)) for n, a in parsed)
+    text = re.sub(r'```(?:json|tool_call|tool)?\s*(\{.*?\}|\[.*?\])\s*```', _fenced, text, flags=re.DOTALL)
+    pos = 0
+    while True:
+        m = _TOOL_JSON_START_RE.search(text, pos)
+        if not m:
+            break
+        try:
+            obj, end = json.JSONDecoder().raw_decode(text, m.start())
+        except Exception:
+            pos = m.end()
+            continue
+        call = _json_tool_call(obj)
+        if call and (call[0] in tools or "arguments" in obj or "parameters" in obj):
+            rep = leaked(call[0], call[1], text[m.start():end])
+            text = text[:m.start()] + rep + text[end:]
+            pos = m.start() + len(rep)
+        else:
+            pos = end
+    # 1c. tool_name(args) written as text, with or without brackets
+    tool_alt = "|".join(sorted(tools, key=len, reverse=True))
+    text = re.sub(r'\[?\s*(?<![A-Za-z0-9_])(' + tool_alt + r')\s*\(([^()\n]*)\)\s*\]?',
+                  lambda m: leaked(m.group(1), _parse_call_args(m.group(1), m.group(2)), m.group(0)), text)
+
+    # 2. Known tag names: one bracket style, ASCII colon, aliases -> canonical names
+    R = _tag_name_res()
+    def _canon(m):
+        raw_name, body = m.group(1), m.group(2) if m.group(2) is not None else m.group(3)
+        key = raw_name.lower()
+        tool = key if key in tools else _TAG_TOOL.get(R["alias"].get(key) or R["lower"].get(key) or "")
+        if tool and (key in tools or re.match(r'\s*\w+\s*[=＝]', body or "")):
+            # a tool name used as a tag, or arguments written as key=value -> canonical tag
+            out = _tool_call_to_tag(tool, _parse_call_args(tool, (body or "").replace("＝", "=")))
+            if out and key in tools and log:
+                logging.info(f"Tool name used as a tag: {m.group(0)[:80]} -> {out[:80]}")
+            if out and not re.search(r':\s*\]$', out) and not re.search(r'=,|=\]', out):
+                return out
+        name = R["alias"].get(key) or R["lower"].get(key) or raw_name
+        body = (body or "").strip()
+        if body and name in _NO_BODY_ALIASES and key in R["alias"]:
+            if log:
+                logging.warning(f"Unknown tag removed: {m.group(0)[:100]}")
+            return ""                      # e.g. [点赞: post_id=..] - no such feature
+        if not body and name.lower() not in _TAG_NO_BODY_OK:
+            if log:
+                logging.warning(f"Tag without content removed: {m.group(0)[:100]}")
+            return ""                      # e.g. [搜索] - nothing to do, don't show it
+        out = f"[{name}: {body}]" if body else f"[{name}]"
+        if log and (key in R["alias"]):
+            logging.info(f"Tag alias {raw_name} -> {name}")
+        return out
+    text = R["tag"].sub(_canon, text)
+
+    # 3. Anything else that still looks like a command tag is removed (and logged), never sent to QQ
+    def _unknown(m):
+        name = m.group(1)
+        if name.upper() in ("CQ", "SEP") or name.lower() in R["lower"]:
+            return m.group(0)
+        if log:
+            logging.warning(f"Unknown tag removed: {m.group(0)[:100]}")
+        return ""
+    text = _UNKNOWN_TAG_RE.sub(_unknown, text)
+    return text
+
 def clean_tags(reply_text: str) -> str:
+    reply_text = normalize_model_tags(reply_text, log=False)
     text = re.sub(r'\[(?:发贴图|Send Sticker|Sticker|sticker):[^\]]+\]', '', reply_text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:发表情|Send Face|Face|face|Emoji|emoji):[^\]]+\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[(?:发语音|Send Voice|Voice|voice):[^\]]+\]', '', text, flags=re.IGNORECASE)
@@ -3615,7 +3884,8 @@ def execute_tool_call(session: ChatSession, tool_name: str, arguments: dict, gen
             q = arguments.get("query", "")
             img_p = search_picture_database(q, session)
             if img_p:
-                return f"找到匹配图片: {os.path.basename(img_p)}。若需发送给对方，可在回复中加入 [PICTURE: {q}]。"
+                return L(f"找到匹配图片: {os.path.basename(img_p)}。若需发送给对方，可在回复中加入 [发图: {q}]。",
+                         f"Found a matching picture: {os.path.basename(img_p)}. To send it, add [PICTURE: {q}] to your reply.")
             else:
                 return f"图片库中未找到与 '{q}' 相关的图片。"
         elif tool_name == "list_pictures":
@@ -4089,7 +4359,7 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
 
         choice = data.get("choices", [{}])[0]
         message_obj = choice.get("message", {})
-        raw_reply = message_obj.get("content", "") or ""
+        raw_reply = normalize_model_tags(message_obj.get("content", "") or "")
         tool_calls = message_obj.get("tool_calls", [])
 
         # Check for inline command tags in raw_reply if tool_calls not used
@@ -5764,8 +6034,8 @@ _QZ_ANY_TAG_RE = re.compile(r'\[(?:发说说|发空间|qzone_post|Post Qzone|pos
                             r')(?:\s*[:：][^\]]*)?\]', re.IGNORECASE)
 
 def parse_qzone_comment_tag(body: str):
-    """[评论说说: ...] -> (post_id, qq, text). Accepts 'post_id=X, text=Y' (qq= optional),
-    'X: Y', 'X, Y' and '#X Y'."""
+    """[评论说说: 编号: 内容] -> (post_id, qq, text). Also accepts 'post_id=X, text=Y' (qq= optional),
+    'X, Y' and '#X Y'."""
     body = (body or "").strip()
     m = re.search(r'(?:^|[,，;；\s])(?:text|comment|content|内容|评论)\s*[=＝:：]\s*', body, re.IGNORECASE)
     if m:
@@ -5773,7 +6043,7 @@ def parse_qzone_comment_tag(body: str):
         pid = re.search(r'(?:post_?id|tid|id|说说编号|编号|说说)\s*[=＝:：]\s*#?([0-9A-Za-z_]+)', head, re.IGNORECASE)
         qq = re.search(r'(?:qq|owner|uin|作者)\s*[=＝:：]\s*(\d{5,12})', head, re.IGNORECASE)
         return (pid.group(1) if pid else ""), (qq.group(1) if qq else ""), text.strip().strip('"“”\'')
-    m = re.match(r'#?([0-9A-Za-z_]{6,})\s*[,，:：|｜\s]\s*(.+)$', body, re.DOTALL)
+    m = re.match(r'#?([0-9A-Za-z_]+)\s*[,，:：|｜\s]\s*(.+)$', body, re.DOTALL)
     if m:
         return m.group(1), "", m.group(2).strip()
     return "", "", 
@@ -5901,8 +6171,8 @@ def qzone_summary_for_master() -> str:
         acts = list(st["activity"])[-8:]
     lines = [L("【QQ空间】你可以用 qzone_* 工具看说说、发说说、评论。你自己想发的和群友请你发的说说都是草稿，主人同意后才用 qzone_post（填 draft_id）发出。",
                "【Qzone】Use the qzone_* tools to read posts, post and comment. Posts you want to write yourself and posts group members ask for are drafts; publish them with qzone_post (draft_id) only after your Master agrees.")]
-    lines.append(L("如果不方便用工具，也可以在回复里写：[看空间]（看主人的）/ [看空间: QQ号] / [看空间: 我] / [看空间: 全部]（主人和所有好友的新说说）、[发说说: 内容]、[发布草稿: D3]、[放弃草稿: D3]、[评论说说: post_id=说说编号, text=评论内容]（编号来自看空间的结果）。",
-                   "If you can't use tools, write these in your reply instead: [read_qzone] (Master's) / [read_qzone: QQ] / [read_qzone: me] / [read_qzone: all] (newest posts from Master and all friends), [post_qzone: text], [publish_draft: D3], [discard_draft: D3], [comment_qzone: post_id=ID, text=comment] (IDs come from read_qzone)."))
+    lines.append(L("如果不方便用工具，也可以在回复里写：[看空间]（看主人的）/ [看空间: QQ号] / [看空间: 我] / [看空间: 全部]（主人和所有好友的新说说）、[发说说: 内容]、[发布草稿: D3]、[放弃草稿: D3]、[评论说说: 说说编号: 评论内容]（编号来自看空间的结果）。",
+                   "If you can't use tools, write these in your reply instead: [read_qzone] (Master's) / [read_qzone: QQ] / [read_qzone: me] / [read_qzone: all] (newest posts from Master and all friends), [post_qzone: text], [publish_draft: D3], [discard_draft: D3], [comment_qzone: post ID: comment] (IDs come from read_qzone)."))
     if drafts:
         lines.append(L("等主人确认的草稿：", "Drafts waiting for your Master:"))
         for did, d in drafts:
