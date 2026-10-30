@@ -415,7 +415,7 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 ### 15.6 Per-member message limit
 - Each member except the Master can trigger at most `group_member_msg_limit` replies per window (rolling 24 hours; if config.json leaves the setting out, 50 is used and a WARNING is logged). Only messages that call the bot count; ordinary chatter does not.
 - After that, the member's messages are **ignored completely** (not even used as background) until the count drops within the window.
-- `group_member_limit_window_sec: 0` makes it a permanent cap that never resets; `group_member_msg_limit: 0` disables the limit. Each ignored message is logged as `reached the limit`.
+- `group_member_limit_window_sec: 0` makes it a permanent cap that never resets; `group_member_msg_limit: 0` disables the limit. When someone uses up their messages, one WARNING is logged (`has used all N messages … ignored until <time>`); after that each ignored message that calls the bot is logged at INFO (`ignoring message`).
 - Counters live in `quota.json` and survive restarts. To lift a limit manually, delete that group's `quota.json`.
 - Optional `group_member_limit_notice`: a one-time message when a member first hits the limit (empty by default = silent).
 

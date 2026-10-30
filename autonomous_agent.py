@@ -393,6 +393,7 @@ class ChatSession:
         self.quota = None
         self.quota_lock = threading.Lock()
         self.limit_notified = {}
+        self.limit_logged = {}
         self.quoted_sender_cache = {}
         self.msg_cache = OrderedDict()   # message_id -> (sender uid, name, short text); used to show quotes
         self.poll_error_logged_at = 0.0
@@ -5543,6 +5544,30 @@ def consume_member_quota(session: ChatSession, uid: int) -> tuple:
             logging.warning(f"[{session.key}] Failed to save quota file: {e}")
         return True, len(stamps), limit
 
+def quota_reset_text(session: ChatSession, uid: int) -> str:
+    """When the member's oldest counted message leaves the window, e.g. '10-31 14:05'; 'never' for a hard cap."""
+    _, window = _quota_params(session)
+    if window <= 0:
+        return "never (hard cap)"
+    with session.quota_lock:
+        stamps = _load_quota(session).get(str(uid), [])
+    if not stamps:
+        return "now"
+    return local_dt(min(stamps) + window).strftime("%m-%d %H:%M")
+
+def log_limit_reached(session: ChatSession, uid: int, used: int, limit: int):
+    """WARNING once per window when someone uses up their messages."""
+    _, window = _quota_params(session)
+    now = time.time()
+    last = session.limit_logged.get(uid, 0)
+    if last and (window <= 0 or now - last < window):
+        return
+    session.limit_logged[uid] = now
+    who = f"Friend {uid}" if session.is_friend else f"Member {uid} in group {session.target_id}"
+    setting = "private_member_msg_limit" if session.is_friend else "group_member_msg_limit"
+    logging.warning(f"{who} has used all {limit} messages ({setting}); their messages are ignored until "
+                    f"{quota_reset_text(session, uid)}.")
+
 def maybe_send_limit_notice(session: ChatSession, uid: int, segments: list):
     """Optional one-time notice per window (group_member_limit_notice); silent by default."""
     notice = str(config.get("group_member_limit_notice") or "").strip()
@@ -5630,6 +5655,11 @@ def handle_group_message(session: ChatSession, m: dict, background_only: bool = 
     # Members over their message limit are ignored completely (not even kept as background)
     if not master and member_over_limit(session, uid):
         if not background_only:
+            limit, _ = _quota_params(session)
+            log_limit_reached(session, uid, limit, limit)
+            if detect_group_trigger(session, segments)[0]:
+                logging.info(f"[group {session.target_id}] Member {uid} is over the limit ({limit}); ignoring message "
+                             f"{m.get('message_id')} (resets {quota_reset_text(session, uid)}).")
             maybe_send_limit_notice(session, uid, segments)
         return
 
@@ -5667,11 +5697,14 @@ def handle_group_message(session: ChatSession, m: dict, background_only: bool = 
     if not master:
         allowed, used, limit = consume_member_quota(session, uid)
         if not allowed:
+            log_limit_reached(session, uid, used, limit)
             logging.info(f"[group {session.target_id}] Member {uid} reached the limit ({used}/{limit}); "
                          f"ignoring message {mid}: {brief[:60]}")
             maybe_send_limit_notice(session, uid, segments)
             return
         logging.info(f"[group {session.target_id}] Member {uid} has used {used}/{limit} messages in the current window.")
+        if limit and used >= limit:
+            log_limit_reached(session, uid, used, limit)
 
     try:
         window = float(config.get("group_followup_window_sec", 10) or 0)
@@ -6884,8 +6917,11 @@ def on_friend_message_arrived(session: ChatSession, msg_id, sender_id: int, raw_
     if name:
         session.friend_name = sanitize_display_name(name, 30)
     allowed, used, limit = consume_member_quota(session, sender_id)
+    if limit and used >= limit:
+        log_limit_reached(session, sender_id, used, limit)
     if not allowed:
-        logging.info(f"[friend {sender_id}] Reached the limit ({used}/{limit}); ignoring message {msg_id}.")
+        logging.info(f"[friend {sender_id}] Reached the limit ({used}/{limit}); ignoring message {msg_id} "
+                     f"(resets {quota_reset_text(session, sender_id)}).")
         notice = str(config.get("private_member_limit_notice") or "").strip()
         last = session.limit_notified.get(sender_id, 0)
         _, window = _quota_params(session)

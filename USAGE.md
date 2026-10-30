@@ -414,7 +414,7 @@ chmod +x setup.sh start.sh
 ### 15.6 群友发言次数限制
 - 每位群友（主人除外）在一个时间窗口内最多触发 `group_member_msg_limit` 次回复（24 小时滚动窗口；config.json 里没写这一项时按 50 次处理，并在日志里给出 WARNING）。只统计叫到机器人的消息；普通聊天不计数。
 - 超过上限后，该群友的消息会被**完全忽略**（连背景消息也不再采用），直到窗口内的次数回落。
-- `group_member_limit_window_sec` 设为 `0` 表示永久上限、永不重置；`group_member_msg_limit` 设为 `0` 表示不限制。被限制的消息会在日志里记一行 `reached the limit`。
+- `group_member_limit_window_sec` 设为 `0` 表示永久上限、永不重置；`group_member_msg_limit` 设为 `0` 表示不限制。某人用完次数时日志里会出现一次 WARNING（`has used all N messages … ignored until 时间`），之后每条被忽略的、叫机器人的消息记一行 INFO（`ignoring message`）。
 - 计数保存在 `quota.json`，重启不会清零。想手动解除限制，删除该群目录下的 `quota.json` 即可。
 - 可选 `group_member_limit_notice`：群友第一次超限时发一条提示语（默认留空，静默忽略）。
 
