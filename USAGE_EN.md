@@ -368,7 +368,7 @@ Other group messages don't trigger a reply; they are only shown to the model as 
 
 - No code path reachable from a group session opens the Master's private files. In a group, `[read_memory]`, `[search_history]` and `[remember]` only act on that group, and `agent.log` (which mixes every chat) is never searched.
 - **Even when the Master speaks in a group, the group-side model gets no private memory**: group replies are public, and the same batch may contain other people's injected text. Ask private things in private chat.
-- Group replies show the Master's QQ number as `[Master's QQ number hidden]`; it is only said out loud when the Master asks (every message in that batch came from the Master).
+- The Master's QQ number is not hidden by default (anyone on QQ can see QQ numbers, and identity is checked by ID, so knowing the number doesn't let anyone pretend to be the Master). To hide it, set `"hide_master_qq": true`: group replies and Qzone then show `[Master's QQ number hidden]`, and the bot only says it when the Master asks (every message in that batch came from the Master).
 - Groups are isolated from each other; group A's memory is invisible in group B.
 - **Memory flows one way**: in private chat, when the Master asks "what happened in the group today?", the companion can use `[group_recall: group ID or keyword]` or the `recall_group_chat` tool.
 - Each group memory entry is tagged with its source, e.g. `(source: QQ:123(Alice))`, written by the program from real QQ IDs. Group memory has a size cap (`group_memory_max_chars`) and is auto-compacted like private memory.
@@ -460,7 +460,7 @@ The bot can use QQ Zone (QQ空间): read the Master's and friends' posts, commen
 - **In private chat** the Master can say "look at my Qzone", "look at QQ:xxx's Qzone" or "comment on my latest post". The bot also remembers what it recently did on Qzone.
 
 ### 16.2 Privacy and safety
-- Qzone is visible to all of the bot's QQ friends, so it is treated like a group chat: no private memory, the Master's QQ number is hidden, plain text only.
+- Qzone is visible to all of the bot's QQ friends, so it is treated like a group chat: no private memory, plain text only (the Master's QQ number is hidden only with `hide_master_qq`).
 - Other people's posts and comments are untrusted; instructions inside them are never followed.
 - Its own posts and members' requests need the Master's approval; only the Master's own requests (checked by QQ ID) are posted directly.
 - Its own posts plus members' requests are capped at 3 a day (`qzone_post_max_per_day`); the Master's requests are exempt.
