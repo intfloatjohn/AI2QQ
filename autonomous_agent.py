@@ -4127,6 +4127,7 @@ def build_group_turn(session: ChatSession, batch: list) -> tuple:
         "provenance": provenance,
         "log_notes": log_notes,
         "media_map": media_map,
+        "master_words": " ".join(str(it.get("text") or "") for it in items if it.get("is_master")),
     }
     return prompt, history_text, [att["b64"] for att in final], all_audios, ctx
 
@@ -4210,7 +4211,8 @@ def _run_generation(session: ChatSession, batch_to_process: list, gen_id: int):
     if session.is_group:
         user_prompt_for_llm, history_record_text, all_images, all_audios, ctx = build_group_turn(session, batch_to_process)
     else:
-        ctx = {"master_only": session.is_master_private, "primary_uid": session.target_id}
+        ctx = {"master_only": session.is_master_private, "primary_uid": session.target_id,
+               "master_words": " ".join(str(it.get("own_text", it.get("text", "")) or "") for it in batch_to_process)}
         all_images = []
         all_audios = []
         lines_for_llm = []
@@ -4334,6 +4336,7 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
 
     session = get_master_session()
     clean_text, images_b64, audios_data, has_voice = parse_incoming_cq_content(raw_text, sender_id, session)
+    own_text = clean_text      # the Master's own words, without any quoted message
     cache_message(session, msg_id, sender_id, "", clean_text)
     quoted_mid = quoted_message_id(raw_text)
     if quoted_mid:
@@ -4352,6 +4355,7 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
     enqueue_session_message(session, {
         "msg_id": msg_id,
         "text": clean_text,
+        "own_text": own_text,
         "images": images_b64,
         "audios": audios_data,
         "time": time.time()
@@ -5873,7 +5877,7 @@ QZONE_POST_TOOL = {
     "type": "function",
     "function": {
         "name": "qzone_post",
-        "description": "发一条QQ空间说说。主人让你发、或者主人同意了某个草稿时使用（同意草稿就填 draft_id，想按主人的意思改就同时给出新的 text）(Post on Qzone: when your Master asks, or approves a draft)",
+        "description": "发QQ空间说说。只有主人在这条消息里亲口让你发时才会直接发出，否则会变成草稿发给主人确认。主人同意某个草稿时填 draft_id；改过内容的草稿会重新发给主人确认 (Post on Qzone. Posted directly only when your Master's own message asks for it; otherwise it becomes a draft for approval. Pass draft_id when your Master approves a draft)",
         "parameters": {
             "type": "object",
             "properties": {
@@ -5928,6 +5932,23 @@ QZONE_GROUP_POST_TOOL = {
     }
 }
 
+# What counts as the Master asking for a post / approving a draft is decided from the Master's
+# OWN words in this turn (ctx["master_words"]), never from what the model claims.
+_QZ_ASK_RE = re.compile(r'发(?:一|个|条|篇|一条|一个|一篇)?(?:说说|动态)|发(?:到|在|个|条)?(?:QQ)?空间|(?:空间|说说)(?:里)?发|'
+                        r'post\b.*\b(?:qzone|qq ?zone)|(?:qzone|qq ?zone).*\bpost', re.IGNORECASE)
+_QZ_APPROVE_RE = re.compile(r'发吧|发布|发出去|发了吧|可以发|可以|同意|确认|没问题|好的|好呀|好啊|^\s*好\s*$|^\s*行\s*$|^\s*嗯+\s*$|'
+                            r'\bok\b|\bokay\b|\byes\b|\bsure\b|\bgo ahead\b|\bpost it\b|\bapprove', re.IGNORECASE)
+_QZ_REFUSE_RE = re.compile(r'不要|不用|不发|不行|不可以|不同意|不好|别|算了|取消|等等|等一下|先不|再说|'
+                           r'\bno\b|don\'?t|do not|cancel|\bwait\b|not yet', re.IGNORECASE)
+
+def master_asked_for_post(ctx: dict) -> bool:
+    words = str((ctx or {}).get("master_words") or "")
+    return bool(_QZ_ASK_RE.search(words)) and not re.search(r'不要发|别发|不用发|don\'?t post|do not post', words, re.IGNORECASE)
+
+def master_approved(ctx: dict) -> bool:
+    words = str((ctx or {}).get("master_words") or "")
+    return bool(_QZ_APPROVE_RE.search(words)) and not _QZ_REFUSE_RE.search(words)
+
 def execute_qzone_tool(session: ChatSession, tool_name: str, arguments: dict, ctx: dict) -> str:
     """Qzone tools with permissions checked by code: the Master's private chat can do everything;
     in a group the Master (verified by QQ ID) posts directly and everyone else only makes drafts."""
@@ -5939,13 +5960,27 @@ def execute_qzone_tool(session: ChatSession, tool_name: str, arguments: dict, ct
         did = str(arguments.get("draft_id") or "").strip()
         if session.is_master_private:
             if did:
-                return qzone_publish_draft(did, text)
-            return qzone_publish(text, "master", redact=False, by_master=True)
+                if not master_approved(ctx):
+                    logging.info(f"[qzone] Draft {did} NOT published: the Master's message doesn't approve it.")
+                    return L(f"主人还没有明确同意，草稿 {did} 没有发出。等主人说“发吧”再发。",
+                             f"Your Master hasn't clearly approved; draft {did} was not posted. Wait until your Master says to post it.")
+                with _qzone_lock:
+                    draft = qzone_state()["drafts"].get(did.upper())
+                if draft and text.strip() and _qzone_clean(text) != draft["text"]:
+                    # Changed text: show the new version to the Master first
+                    qzone_discard_draft(did)
+                    return qzone_create_draft(text, "self")
+                return qzone_publish_draft(did)
+            if master_asked_for_post(ctx):
+                return qzone_publish(text, "master", redact=False, by_master=True)
+            return qzone_create_draft(text, "self")
         if session.is_group:
             if did:
                 return denied
-            if ctx.get("master_only"):
+            if ctx.get("master_only") and master_asked_for_post(ctx):
                 return qzone_publish(text, "group_master", redact=True, by_master=True)
+            if ctx.get("master_only"):
+                return qzone_create_draft(text, "self")
             requester = ctx.get("provenance") or L("群友", "a member")
             return qzone_create_draft(text, "member", requester=requester,
                                       group_label=session.group_name or str(session.target_id))

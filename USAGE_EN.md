@@ -464,7 +464,8 @@ The bot can use QQ Zone (QQ空间): read the Master's and friends' posts, commen
   - It never comments twice on the same post.
 - **Its own posts**: each day there is a 40% chance (`qzone_random_post_chance_per_day`) that at a random time between 9:00 and 23:00 (`qzone_active_hours`) it wants to post. It sends the draft to the Master first (`[Qzone draft D3] …`). It posts only after the Master says OK, drops it if the Master says no, and can rewrite it on request. Drafts expire after 24 hours.
 - **Asking it to post**:
-  - When the Master asks, in private chat or in a group, it posts directly.
+  - When the Master's own message asks for a post ("发条说说", "post this on Qzone"…), in private chat or in a group, it posts directly. The program checks the Master's actual words (quoted text doesn't count); anything the model decides on its own becomes a draft.
+  - A draft is posted only when the Master's reply approves it (发吧 / 可以 / ok…, with no 不要 / 别 / 算了 / no); a changed text becomes a new draft to approve.
   - When a group member asks, the post becomes a draft for the Master to approve (at most 3 a day, `qzone_member_request_max_per_day`).
 - **In private chat** the Master can say "look at my Qzone", "look at QQ:xxx's Qzone", "what have my friends posted" (newest posts from the last 24 hours by the Master and all friends, up to 10; at most 20 more spaces read per request) or "comment on my latest post". The bot also remembers what it recently did on Qzone.
 
