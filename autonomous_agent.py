@@ -810,11 +810,31 @@ def _trim_memory_text(text: str, max_chars: int) -> str:
         body.pop(0)
     return "\n".join([header] + body) if header else "\n".join(body)
 
+_MEMORY_FILLER = set("的了呢啊吧呀哦哟喔嘛啦喵哈嗯噢～~")
+
+def _memory_norm(text: str) -> str:
+    return re.sub(r'[\s\W_]+', '', text or "").lower()
+
+def memory_fact_is_duplicate(new_fact: str, old_line: str) -> bool:
+    """True only when new_fact adds nothing to old_line: identical after removing punctuation and
+    filler particles, or fully contained in it. Corrections (下周三→下周四, 喜欢→不喜欢) are not duplicates."""
+    a, b = _memory_norm(new_fact), _memory_norm(old_line)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if len(a) >= 6 and a in b:
+        # "喜欢吃香菜和葱" inside "不喜欢吃香菜和葱" is the opposite fact, not a duplicate
+        idx = b.find(a)
+        if not (idx > 0 and b[idx - 1] in "不没别未非无"):
+            return True
+    strip = lambda t: "".join(ch for ch in t if ch not in _MEMORY_FILLER)
+    return strip(a) == strip(b) and bool(strip(a))
+
 def update_memory_realtime(session: ChatSession, content: str, ctx: dict = None) -> str:
     """Appends a fact to the session's own memory file immediately.
     Group memories get a provenance tag computed by code from the real sender IDs of the batch.
-    Performs semantic deduplication to prevent repetitive facts or duplicate dates across turns."""
-    import difflib
+    Skips facts that are already saved word for word (see memory_fact_is_duplicate)."""
     lang = config.get("language", "zh").lower()
     clean_content = content.strip()
     if session.is_group:
@@ -822,10 +842,8 @@ def update_memory_realtime(session: ChatSession, content: str, ctx: dict = None)
     if not clean_content:
         return "Memory content is empty." if lang == "en" else "记忆内容为空。"
 
-    # Strip redundant date/time prefixes model might have included (e.g. "2026-10-30 主人下周三...")
-    clean_fact = re.sub(r'^(?:\[?\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?(?:\s*\d{1,2}:\d{2}(?::\d{2})?)?\]?|\d{1,2}:\d{2})\s*[-:：]?\s*', '', clean_content).strip()
-    if not clean_fact:
-        clean_fact = clean_content
+    # Keep the fact exactly as written (dates and times included); only acting notes are dropped.
+    clean_fact = re.sub(r'[ \t]{2,}', ' ', strip_stage_actions(clean_content)).strip() or clean_content
 
     stored = clean_fact
     if session.is_group:
@@ -843,25 +861,15 @@ def update_memory_realtime(session: ChatSession, content: str, ctx: dict = None)
             except Exception:
                 existing = ""
 
-        # Semantic & substring deduplication against existing memory entries
-        core_norm = re.sub(r'[\s\W_]+', '', clean_fact).lower()
-        if existing and core_norm:
+        # Skip only true duplicates: the same fact again, or a fact already contained in an existing
+        # line. Anything that changes a number, date, name or adds 不/没 is new information and is saved.
+        if existing:
             for line in existing.split("\n"):
                 line_clean = re.sub(r'^[-*]\s*\[.*?\]\s*', '', line).strip()
-                line_clean = re.sub(r'\(来源:\s*.*?\)', '', line_clean).strip()
-                line_norm = re.sub(r'[\s\W_]+', '', line_clean).lower()
-                if not line_norm:
-                    continue
-                # Exact or substring match
-                if core_norm == line_norm or (len(core_norm) >= 6 and (core_norm in line_norm or line_norm in core_norm)):
-                    logging.info(f"Skipping duplicate memory [{session.key}]: '{clean_fact}' matches existing line '{line_clean}'")
+                line_clean = re.sub(r'\((?:来源|source):\s*.*?\)', '', line_clean).strip()
+                if memory_fact_is_duplicate(clean_fact, line_clean):
+                    logging.info(f"Skipping duplicate memory [{session.key}]: '{clean_fact}' is already covered by '{line_clean}'")
                     return L(f"该信息已在记忆库中记录：{clean_fact}", f"Fact already saved in memory: {clean_fact}")
-                # Fuzzy sequence similarity match
-                if len(core_norm) >= 8 and len(line_norm) >= 8:
-                    ratio = difflib.SequenceMatcher(None, core_norm, line_norm).ratio()
-                    if ratio > 0.72:
-                        logging.info(f"Skipping highly similar memory [{session.key}] (sim={ratio:.2f}): '{clean_fact}' vs '{line_clean}'")
-                        return L(f"该信息已在记忆库中记录：{clean_fact}", f"Fact already saved in memory: {clean_fact}")
 
         new_entry = f"- [{now_str}] {stored}"
         if existing:
@@ -997,28 +1005,44 @@ def search_chat_history(session: ChatSession, query: str, max_results: int = 8) 
 
 SEARCH_CACHE = {}
 
+_WEATHER_WORDS_RE = re.compile(r'天气|气温|温度|预报|下雨|下雪|weather|temperature|forecast', re.IGNORECASE)
+# Words around a city name that are not part of it ("今天杭州天气怎么样" -> 杭州)
+_WEATHER_NOISE_RE = re.compile(
+    r'请问|帮我|帮忙|给我|查一下|查查|查询|看一下|看看|搜一下|搜索|一下|'
+    r'今天|明天|后天|大后天|今日|明日|今晚|明晚|今早|早上|晚上|下午|上午|现在|当前|目前|实时|'
+    r'本周|这周|下周|周末|未来|最近|这几天|几天|一周|三天|七天|'
+    r'会不会|是不是|会|要|怎么样|如何|咋样|多少度|几度|吗|呢|啊|吧|的'
+)
+
+def extract_weather_city(query: str) -> str:
+    q = (query or "").strip()
+    m = re.search(r'weather\s+(?:in|for|at)\s+([A-Za-z][A-Za-z .\'-]{1,40}?)(?:\s+(?:today|tomorrow|now|this week))?\s*[?.!]*$', q, re.IGNORECASE) \
+        or re.search(r'^([A-Za-z][A-Za-z .\'-]{1,40}?)\s+weather\b', q, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    zh = _WEATHER_NOISE_RE.sub('', q)
+    m = re.search(r'([\u4e00-\u9fa5]{2,8}?)(?:市|区|县)?(?:天气|气温|温度|预报|下雨|下雪)', zh)
+    if m:
+        return m.group(1)
+    rest = _WEATHER_WORDS_RE.sub('', zh).strip()
+    return rest if re.fullmatch(r'[\u4e00-\u9fa5]{2,8}', rest or "") else ""
+
 def fetch_weather_direct(query: str) -> str:
-    """Extracts city from query and fetches real-time weather data from wttr.in."""
+    """For weather questions, fetches live data for the named city from wttr.in."""
     try:
-        if not any(k in query.lower() for k in ["天气", "气温", "温度", "预报", "下雨", "weather", "temp"]):
+        if not _WEATHER_WORDS_RE.search(query or ""):
             return ""
-        city_m = re.search(r'([\u4e00-\u9fa5]{2,8}?)(?:市|区|县)?(?:的)?(?:今天|明天|后天|本周|这周|未来)?(?:天气|气温|温度|预报|下雨|多云|晴天)', query)
-        if not city_m:
-            city_m = re.search(r'([\u4e00-\u9fa5]{2,6})\s*(?:weather|天气)', query, re.IGNORECASE)
-        city = city_m.group(1).strip() if city_m else ""
-        if not city and len(query) <= 6:
-            city = query.replace("天气", "").replace("预报", "").replace("气温", "").replace("温度", "").strip()
+        city = extract_weather_city(query)
         if not city:
             return ""
-
-        url_city = urllib.parse.quote(city)
-        fmt = urllib.parse.quote("%l: %C %t (体感 %f), 湿度 %h, 风向 %w")
-        url = f"https://wttr.in/{url_city}?m&format={fmt}&lang=zh"
+        zh = config.get("language", "zh").lower() != "en"
+        fmt = "%l: %C %t (体感 %f), 湿度 %h, 风 %w" if zh else "%l: %C %t (feels like %f), humidity %h, wind %w"
+        url = f"https://wttr.in/{urllib.parse.quote(city)}?m&format={urllib.parse.quote(fmt)}&lang={'zh' if zh else 'en'}"
         req = urllib.request.Request(url, headers={"User-Agent": "curl/7.88.0"})
         with urllib.request.urlopen(req, timeout=3.5) as resp:
             text = resp.read().decode("utf-8", errors="ignore").strip()
-        if text and "Unknown location" not in text and not text.startswith("<!DOCTYPE"):
-            return f"【{city} 气象实况数据】: {text}"
+        if text and "Unknown location" not in text and not text.lstrip().startswith("<"):
+            return L(f"【{city} 实时天气】: {text}", f"[Live weather for {city}]: {text}")
     except Exception as e:
         logging.debug(f"Direct weather query error: {e}")
     return ""
@@ -1243,11 +1267,98 @@ def get_llm_url() -> str:
         return base
     return f"{base.rstrip('/')}/chat/completions"
 
+# Media kinds the API rejected at runtime, per model name: {"model": {"vision", "audio"}}
+_MEDIA_REJECTED = {}
+_media_warned = {}
+_media_warn_lock = threading.Lock()
+
+def _media_rejected(kind: str, model_name: str = None) -> bool:
+    return kind in _MEDIA_REJECTED.get((model_name or config.get("model", "")).lower().strip(), set())
+
+def mark_media_rejected(kind: str, model_name: str = None):
+    _MEDIA_REJECTED.setdefault((model_name or config.get("model", "")).lower().strip(), set()).add(kind)
+
+def warn_media_unavailable(session: "ChatSession", kind: str, reason: str):
+    """Sends a fixed system warning (written by code, not the model) when pictures or voice could not
+    be given to the model. kind: "vision" / "audio"; reason: "model" (not supported) / "api" (API error).
+    At most once per 10 min per chat (1 h in groups) for each kind."""
+    if session is None:
+        return
+    interval = 3600 if session.is_group else 600
+    key = (session.key, kind)
+    now = time.time()
+    with _media_warn_lock:
+        if now - _media_warned.get(key, 0) < interval:
+            return
+        _media_warned[key] = now
+    model_name = config.get("model", "")
+    texts = {
+        ("vision", "model"): (f"⚠️ [系统提示] NOT A VISION MODEL：当前模型 ({model_name}) 不支持识图，图片没有被读取。",
+                              f"⚠️ [System] NOT A VISION MODEL: the current model ({model_name}) can't read images, so the picture was skipped."),
+        ("vision", "api"):   (f"⚠️ [系统提示] VISION IS NOT AVAILABLE: API ERROR：模型接口拒绝了图片 ({model_name})，这次只按文字回复。",
+                              f"⚠️ [System] VISION IS NOT AVAILABLE: API ERROR: the model API ({model_name}) rejected the picture; replying to the text only."),
+        ("audio", "model"):  (f"⚠️ [系统提示] VOICE IS NOT AVAILABLE：当前模型 ({model_name}) 不支持听语音，也没有可用的语音转文字服务，语音没有被读取。",
+                              f"⚠️ [System] VOICE IS NOT AVAILABLE: the current model ({model_name}) can't listen to audio and no speech-to-text service is set up, so the voice message was skipped."),
+        ("audio", "api"):    (f"⚠️ [系统提示] VOICE IS NOT AVAILABLE: API ERROR：模型接口拒绝了语音 ({model_name})，这次只按文字回复。",
+                              f"⚠️ [System] VOICE IS NOT AVAILABLE: API ERROR: the model API ({model_name}) rejected the voice message; replying to the text only."),
+    }
+    zh_text, en_text = texts[(kind, reason)]
+    text = L(zh_text, en_text)
+    logging.warning(f"[{session.key}] {en_text}")
+    try:
+        send_to_session(session, [{"type": "text", "data": {"text": text}}])
+    except Exception as e:
+        logging.warning(f"Failed to send media warning [{session.key}]: {e}")
+
+_MEDIA_ERROR_RE = re.compile(r'image|vision|multimodal|multi-modal|image_url|input_audio|audio|modalit|content type|'
+                             r'unsupported|not support|图片|图像|音频|多模态|不支持', re.IGNORECASE)
+
+def strip_media_from_messages(messages: list) -> tuple:
+    """Returns (messages with pictures/voice replaced by a short text note, set of kinds removed)."""
+    removed = set()
+    out = []
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(content, list):
+            out.append(m)
+            continue
+        texts, here = [], set()
+        for item in content:
+            t = item.get("type") if isinstance(item, dict) else None
+            if t == "text":
+                texts.append(item.get("text", ""))
+            elif t == "image_url":
+                here.add("vision")
+            elif t == "input_audio":
+                here.add("audio")
+        removed |= here
+        note = []
+        if "vision" in here:
+            note.append(L("（图片无法读取，不要猜测内容）", "(picture could not be read; don't guess its content)"))
+        if "audio" in here:
+            note.append(L("（语音无法读取，不要猜测内容）", "(voice message could not be read; don't guess its content)"))
+        m2 = dict(m)
+        m2["content"] = "\n".join([t for t in texts if t] + note)
+        out.append(m2)
+    return out, removed
+
+def model_supports_audio(model_name: str = None) -> bool:
+    """Whether voice can be sent to the model as audio (config enable_audio_input overrides)."""
+    cfg = config.get("enable_audio_input")
+    if cfg is not None:
+        return bool(cfg)
+    if _media_rejected("audio", model_name):
+        return False
+    m = (model_name or config.get("model", "")).lower()
+    return any(x in m for x in ["gemini", "gpt-4o", "omni", "audio"])
+
 def model_supports_vision(model_name: str = None) -> bool:
     """Detects whether the configured model supports vision/image inputs."""
     cfg_vision = config.get("enable_vision")
     if cfg_vision is not None:
         return bool(cfg_vision)
+    if _media_rejected("vision", model_name):
+        return False
 
     m = (model_name or config.get("model", "")).lower().strip()
     # Explicit text-only models that silently drop image payloads on OpenAI-compatible APIs
@@ -2290,10 +2401,8 @@ def process_incoming_voice(file_id: str, file_url: str = "", session: "ChatSessi
 
         # 2. Check if model supports native multimodal audio (Gemini, GPT-4o, Omni)
         model_name = config.get("model", "pure-text").lower()
-        model_supports_audio = any(m in model_name for m in ["gemini", "gpt-4o", "omni", "audio"])
-        
         target_audio = std_mp3 if (std_mp3 and os.path.exists(std_mp3)) else local_path
-        if model_supports_audio and os.path.exists(target_audio):
+        if model_supports_audio(model_name) and os.path.exists(target_audio):
             try:
                 with open(target_audio, "rb") as af:
                     b64_audio = base64.b64encode(af.read()).decode("utf-8")
@@ -2303,12 +2412,10 @@ def process_incoming_voice(file_id: str, file_url: str = "", session: "ChatSessi
             except Exception as ae:
                 logging.warning(f"Failed to encode audio for multimodal input: {ae}")
 
-        return (
-            f"[语音消息: 收到用户发送的语音 ({os.path.basename(local_path)})。"
-            f"系统提示：当前配置的模型为纯文本模型 ({config.get('model', 'pure-text')})，且后台暂未配置可用的 ASR 语音识别服务。"
-            f"请在回复中礼貌告知对方你暂时无法收听语音，请对方发送文字。]",
-            None
-        )
+        warn_media_unavailable(session, "audio", "model")
+        return (L("[语音消息：内容无法读取（当前模型不能听语音，也没有语音转文字服务；系统已经提示过对方）。不要猜测语音内容。]",
+                  "[Voice message: its content can't be read (this model can't listen to audio and no speech-to-text is set up; the user has been notified by the system). Don't guess what it said.]"),
+                None)
 
     return ("（收到一条语音消息，但音频文件获取失败）", None)
 
@@ -2425,6 +2532,26 @@ def parse_incoming_cq_content(raw_text: str, sender_id: int, session: "ChatSessi
     clean_text = _cq_unescape(clean_text)
     return clean_text, images_b64, audios_data, has_voice
 
+# Acting notes the model sometimes writes in brackets. Single characters like 笑/跳/哼 are not
+# listed on their own, so remarks such as （开玩笑的） or （跳过这步） are kept.
+_STAGE_ACTIONS_ZH = (
+    r'低头|脸红|小声|叹气|微笑|眨眼|摇头|点头|歪头|抱胸|叉腰|轻笑|轻咳|抓头|挠头|委屈|害羞|'
+    r'生气|撒娇|哭泣|抽泣|愣住|嘀咕|嘟嘴|望天|托腮|扶额|摊手|摆手|轻声|小跑|转身|挥手|'
+    r'蹦跳|跳起来|倒吸|擦泪|拍手|耸肩|咬唇|翻白眼|揉眼睛|喘气|吸气|轻哼|哼了一声|哼唧|打哈欠|'
+    r'发呆|捂脸|冷笑|坏笑|偷笑|大笑|笑了笑|笑嘻嘻|嘻嘻笑|摇尾巴|竖起耳朵|蹭蹭|伸懒腰'
+)
+_STAGE_ACTIONS_EN = (
+    r'smiles?|sighs?|winks?|blushes?|chuckles?|giggles?|whispers?|pouts?|nods?|'
+    r'shrugs?|rolls eyes?|yawns?|tilts head|looks down|laughs?|frowns?'
+)
+_STAGE_ZH_RE = re.compile(rf'（[^\d（）\n]{{0,6}}(?:{_STAGE_ACTIONS_ZH})[^\d（）\n]{{0,6}}）')
+_STAGE_EN_RE = re.compile(rf'\([^()\d\n]{{0,12}}\b(?:{_STAGE_ACTIONS_EN})\b[^()\d\n]{{0,12}}\)', re.IGNORECASE)
+
+def strip_stage_actions(text: str) -> str:
+    """Removes acting notes like （低头脸红） or (smiles softly) and nothing else."""
+    text = _STAGE_ZH_RE.sub('', text or "")
+    return _STAGE_EN_RE.sub('', text)
+
 _ECHOED_LABEL_RE = re.compile(r'【(?:主人✔|Master✔|群友 QQ:[^】]*|Member QQ:[^】]*)】')
 
 def sanitize_reply(text: str, session: "ChatSession" = None, ctx: dict = None) -> str:
@@ -2441,20 +2568,8 @@ def sanitize_reply(text: str, session: "ChatSession" = None, ctx: dict = None) -
     cleaned = re.sub(r'\*[^*]{1,20}\*', '', cleaned)
     # 4. Strip stray asterisks
     cleaned = cleaned.replace('**', '').replace('*', '')
-    # 5. Strip Chinese/English stage actions only (e.g. （低头脸红）), preserving legitimate conversational remarks
-    _STAGE_ACTIONS = (
-        r'低头|脸红|小声|叹气|微笑|眨眼|摇头|点头|歪头|抱胸|叉腰|轻笑|轻咳|抓头|委屈|害羞|'
-        r'生气|撒娇|哭泣|抽泣|愣住|嘀咕|嘟嘴|望天|托腮|扶额|摊手|摆手|轻声|小跑|转身|挥手|'
-        r'跳|倒吸|擦泪|拍手|耸肩|咬唇|白眼|揉眼睛|喘气|吸气|哼|哈欠|发呆|捂脸|冷笑|坏笑|偷笑|笑'
-    )
-    cleaned = re.sub(rf'（(?:[^\d）]{{0,6}}(?:{_STAGE_ACTIONS})[^\d）]{{0,6}})）', '', cleaned)
-    cleaned = re.sub(r'^\s*（[^\d）\n]{1,15}）\s*', '', cleaned)
-    _EN_STAGE_ACTIONS = (
-        r'smiles?|sighs?|winks?|blushes?|chuckles?|giggles?|whispers?|pouts?|nods?|'
-        r'shrugs?|rolls eyes?|yawns?|tilts head|looks down|laughs?|frowns?'
-    )
-    cleaned = re.sub(rf'\((?:[^()\d]{{0,6}}(?:{_EN_STAGE_ACTIONS})[^()\d]{{0,6}})\)', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'^\s*\([^\d)\n]{1,20}\)\s*', '', cleaned)
+    # 5. Strip acting notes such as （低头脸红） / (smiles); keep every other bracket
+    cleaned = strip_stage_actions(cleaned)
     cleaned = cleaned.strip()
 
     # Strip any accidental single numbered list prefix (e.g. '1. ', '1、', '1: ')
@@ -3204,10 +3319,11 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
 
     effective_images_b64 = images_b64 if supports_vision else []
     if images_b64 and not supports_vision:
+        warn_media_unavailable(session, "vision", "model")
         vision_degrade_notice = (
-            f"【系统提示：对方发送了 {len(images_b64)} 张图片/表情包，但当前配置的大模型 ({model_name}) 为纯文本模型，不具备看图视觉能力。请在回复中自然告知对方你当前使用的是纯文本模型，暂时无法查看图片内容。】"
+            f"【系统提示：这里有 {len(images_b64)} 张图片/表情包，但当前模型看不到图片，系统已经提示过对方。不要描述或猜测图片内容。】"
             if lang == "zh" else
-            f"【System Notice: The user sent {len(images_b64)} image(s), but the current model ({model_name}) is a text-only model without vision capabilities. Please naturally inform the user that you currently cannot view images.】"
+            f"[System note: {len(images_b64)} image(s) were attached, but this model can't see images; the user has been notified by the system. Don't describe or guess their content.]"
         )
         if user_prompt:
             user_prompt = f"{user_prompt}\n\n{vision_degrade_notice}"
@@ -3270,9 +3386,12 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
             payload["tools"] = tools
 
         data = {}
+        stripped_media = set()
+        media_error_text = False
         for attempt in range(2):
             if not session.is_current(gen_id):
                 return ""
+            err_status, err_body = 0, ""
             try:
                 if REQUESTS_AVAILABLE:
                     resp = requests.post(url, json=payload, headers=headers, timeout=35)
@@ -3283,6 +3402,7 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
                         except Exception as je:
                             logging.warning(f"LLM call attempt #{attempt+1} JSON decode error on {url}: {je}, body={resp.text[:200]}")
                     else:
+                        err_status, err_body = resp.status_code, resp.text[:1000]
                         logging.warning(f"LLM call attempt #{attempt+1} failed ({resp.status_code}) on {url}: {resp.text[:200]}")
                 else:
                     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
@@ -3295,6 +3415,7 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
                         break
             except urllib.error.HTTPError as he:
                 err_body = he.read().decode("utf-8", errors="ignore") if he.fp else str(he)
+                err_status = he.code
                 logging.warning(f"LLM call attempt #{attempt+1} failed ({he.code}): {err_body[:200]}")
             except Exception as e:
                 logging.warning(f"LLM call attempt #{attempt+1} error: {e}")
@@ -3313,6 +3434,10 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
                         continue
                     else:
                         clean_msgs.append(m)
+                # The API refused the request and it carried pictures/voice: retry without them.
+                if 400 <= err_status < 500 and err_status not in (401, 403, 429):
+                    clean_msgs, stripped_media = strip_media_from_messages(clean_msgs)
+                    media_error_text = bool(_MEDIA_ERROR_RE.search(err_body or ""))
                 payload = {
                     "model": model_name,
                     "messages": clean_msgs,
@@ -3322,6 +3447,15 @@ def query_llm(session: ChatSession, user_prompt: str, images_b64: list, all_audi
                 continue
             else:
                 break
+
+        if data and stripped_media:
+            # It worked once the pictures/voice were removed. If the error named them, this model
+            # does not accept them: stop sending them for the rest of this run.
+            for kind in stripped_media:
+                if media_error_text:
+                    mark_media_rejected(kind, model_name)
+                warn_media_unavailable(session, kind, "api")
+            messages, _ = strip_media_from_messages(messages)
 
         choice = data.get("choices", [{}])[0]
         message_obj = choice.get("message", {})
@@ -4676,9 +4810,14 @@ def review_group_media(session: ChatSession, media_id: str, ctx: dict) -> str:
         label = entry.get("label") or L("（没有描述）", "(no description)")
         return L(f"这个{kind_label}已经超过保存期被删除了，只剩当时的记录：{label}",
                  f"This {kind_label} was deleted after the retention period; the saved note says: {label}")
+    is_voice = entry.get("kind") == "voice"
+    if not (model_supports_audio() if is_voice else model_supports_vision()):
+        label = entry.get("label") or L("（没有描述）", "(no description)")
+        return L(f"当前模型不能直接{'听语音' if is_voice else '看图片'}，只能提供当时的记录：{label}",
+                 f"This model can't {'listen to audio' if is_voice else 'see images'}; the saved note says: {label}")
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
-    if entry.get("kind") == "voice":
+    if is_voice:
         item = {"type": "input_audio", "input_audio": {"data": b64, "format": "mp3"}}
     else:
         item = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}

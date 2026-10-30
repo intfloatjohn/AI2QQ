@@ -249,7 +249,9 @@ python3 mcp-server/onebot_mcp.py
 * `bot_qq`: The QQ account logged into NapCat.
 * `debounce_delay_sec`: Debounce buffering window (seconds). Accumulates rapid-fire messages into a single conversational turn.
 * `max_batch_wait_sec`: Maximum batch wait ceiling (seconds) before forcing reply generation.
-* `enable_multi_bubble_reply`: Enables `[SEP]` splitting into consecutive message bubbles.
+* `enable_multi_bubble_reply`: Enables `[SEP]` splitting into consecutive message bubbles. Replies the model splits with blank lines are also sent as separate bubbles (not when they contain code, tables or lists).
+* `private_max_bubbles`: most bubbles per private reply (default 4; extra parts are merged into the last one). Groups use `group_max_bubbles`.
+* `enable_vision` / `enable_audio_input`: whether the model can see images / listen to audio. Default `null` = guessed from the model name. When a text-only model gets a picture or voice message, the bot sends a fixed system warning (e.g. `NOT A VISION MODEL`). If the model API returns an error because of a picture or voice message, the bot retries once without it and warns `VISION IS NOT AVAILABLE: API ERROR`. Each warning is sent at most once per 10 min in private chat and once per hour in a group. Set `true` / `false` if the guess is wrong.
 * `enable_picture_database`: Enables the autonomous visual library (`picture_db/`).
 * `poll_interval_sec`: Polling interval for new messages (recommended: 0.6 ~ 1.0s).
 * `compact_threshold` / `compact_keep_recent`: Turn threshold for long-term memory summarization.
