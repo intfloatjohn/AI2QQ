@@ -6115,8 +6115,13 @@ def main():
     group_poller.start()
     threading.Thread(target=qzone_loop, daemon=True).start()
 
+    stop_state = {"done": False}
+
     def stop_docker_napcat_if_local():
-        """Cleanly stops the local NapCat Docker container on exit if it is running."""
+        """Cleanly stops the local NapCat Docker container on exit if it is running (once)."""
+        if stop_state["done"]:
+            return
+        stop_state["done"] = True
         try:
             if os.getenv("KEEP_DOCKER", "0") == "1" or os.getenv("AUTO_STOP_DOCKER", "true").lower() == "false":
                 return
@@ -6128,7 +6133,7 @@ def main():
                         logging.info("[*] Stopping local NapCat Docker container...")
                     except Exception:
                         print("[*] Stopping local NapCat Docker container...", flush=True)
-                    subprocess.run(["docker", "stop", "napcat"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
+                    subprocess.run(["docker", "stop", "-t", "5", "napcat"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
                     try:
                         logging.info("[+] NapCat Docker container stopped.")
                     except Exception:
@@ -6138,28 +6143,29 @@ def main():
 
     atexit.register(stop_docker_napcat_if_local)
 
+    shutdown_requested = threading.Event()
+
     def handle_signal(signum, frame):
-        # Ignore repeated signals to prevent reentrant handler execution
-        signal.signal(signum, signal.SIG_IGN)
-        try:
-            logging.info("Exiting cleanly...")
-        except Exception:
-            print("Exiting cleanly...", flush=True)
-        stop_docker_napcat_if_local()
-        sys.exit(0)
+        # Only set a flag here. Logging or stopping Docker inside a signal handler can interrupt a
+        # log line that is being written ("reentrant call inside <stdout>"). A second Ctrl+C quits at once.
+        if shutdown_requested.is_set():
+            os._exit(130)
+        shutdown_requested.set()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
     try:
-        while True:
-            time.sleep(1)
+        while not shutdown_requested.wait(1):
+            pass
     except KeyboardInterrupt:
-        try:
-            logging.info("Daemon stopped.")
-        except Exception:
-            print("Daemon stopped.", flush=True)
-        stop_docker_napcat_if_local()
+        pass
+    try:
+        logging.info("Exiting cleanly...")
+    except Exception:
+        print("Exiting cleanly...", flush=True)
+    stop_docker_napcat_if_local()
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
