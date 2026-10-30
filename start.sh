@@ -33,20 +33,20 @@ AGENT_PID=""
 
 cleanup() {
     # Disable traps to avoid duplicate/recursive calls
-    trap - INT TERM SIGHUP EXIT
+    trap - INT TERM HUP EXIT
 
     echo ""
     echo "=================================================================="
     echo "      Shutting down QQ AI Companion Daemon & Services...          "
     echo "=================================================================="
 
-    # Terminate background log follower if running
+    # Terminate background log follower if running (both ends of the pipe: docker logs -f and the filter)
     if [ -n "$LOG_PID" ]; then
         kill -TERM "$LOG_PID" 2>/dev/null || true
         pkill -P "$LOG_PID" 2>/dev/null || true
-        wait "$LOG_PID" 2>/dev/null || true
         LOG_PID=""
     fi
+    pkill -f "logs -f --tail 0 napcat" 2>/dev/null || true
 
     # Terminate background agent process if running
     if [ -n "$AGENT_PID" ] && kill -0 "$AGENT_PID" 2>/dev/null; then
@@ -62,7 +62,7 @@ cleanup() {
         if command -v docker >/dev/null 2>&1; then
             if $DOCKER_CMD ps --format '{{.Names}}' 2>/dev/null | grep -q "^napcat$"; then
                 echo "[*] Stopping NapCat Docker container..."
-                $DOCKER_CMD stop napcat >/dev/null 2>&1 || true
+                $DOCKER_CMD stop -t 5 napcat >/dev/null 2>&1 || $DOCKER_CMD kill napcat >/dev/null 2>&1 || true
                 echo "[+] NapCat Docker container stopped."
             fi
         fi
@@ -71,7 +71,12 @@ cleanup() {
     echo "[✓] Shutdown completed successfully."
 }
 
-trap cleanup INT TERM SIGHUP EXIT
+# Ctrl+C / kill must END the script after cleaning up. (Before, cleanup ran and then the script carried
+# on, e.g. the login-wait loop kept polling and could even restart the NapCat container.)
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+trap cleanup EXIT
 
 # 3. Determine OneBot HTTP API endpoint from config.json
 ONEBOT_API="http://127.0.0.1:3000"
@@ -84,8 +89,8 @@ fi
 
 # 2. Check if OneBot 11 is already responding
 check_onebot_online() {
-    curl -s --connect-timeout 2 "${ONEBOT_API}/get_version_info" >/dev/null 2>&1 || \
-    curl -s --connect-timeout 2 "${ONEBOT_API}/get_status" >/dev/null 2>&1
+    curl -s --connect-timeout 2 --max-time 4 "${ONEBOT_API}/get_version_info" >/dev/null 2>&1 || \
+    curl -s --connect-timeout 2 --max-time 4 "${ONEBOT_API}/get_status" >/dev/null 2>&1
 }
 
 # Random WebUI token for newly created NapCat containers (never a fixed, publicly known one)

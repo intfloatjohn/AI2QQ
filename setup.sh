@@ -91,8 +91,8 @@ if [ -f "config.json" ]; then
 fi
 
 check_onebot_online() {
-    curl -s --connect-timeout 2 "${ONEBOT_API}/get_version_info" >/dev/null 2>&1 || \
-    curl -s --connect-timeout 2 "${ONEBOT_API}/get_status" >/dev/null 2>&1
+    curl -s --connect-timeout 2 --max-time 4 "${ONEBOT_API}/get_version_info" >/dev/null 2>&1 || \
+    curl -s --connect-timeout 2 --max-time 4 "${ONEBOT_API}/get_status" >/dev/null 2>&1
 }
 
 # Random WebUI token for newly created NapCat containers (never a fixed, publicly known one)
