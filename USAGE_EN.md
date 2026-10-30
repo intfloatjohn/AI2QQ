@@ -47,12 +47,14 @@ All files controlling the AI companion's character, personality, speech style, a
 1. **Short-Term Context** (`history.json`): Preserves recent conversational turns for immediate dialogue continuity.
 2. **Realtime Dynamic Memory Updates**: When the AI companion discovers key facts, user preferences, or when the user says "remember that...", the AI outputs `[remember: content]` (or `[更新记忆: 内容]`). The backend immediately appends this fact to `memory_summary.txt` without waiting for context compaction!
 3. **Long-Term Memory Retrieval**: The AI can autonomously recall its archive by issuing `[read_memory]` (or `[查看记忆]`).
-4. **Auto-Compact Summarization**: When conversation turns reach the threshold (`compact_threshold`, default: 30), a background worker automatically summarizes older turns into `memory_summary.txt` while keeping the most recent 12 turns in active context.
+4. **Auto-Compact**: When conversation turns reach the threshold (`compact_threshold`, default: 30), a background worker extracts **new** facts from the older turns and appends them, dated, to `memory_summary.txt`, keeping the most recent 12 turns in active context. Existing memory is never rewritten or deleted here; if the model call fails, the old turns are kept for next time.
+5. **Tidying and backups**: when memory grows past `memory_max_chars` (default 8000 characters; `group_memory_max_chars`, 3000, for groups), the model merges duplicate and outdated entries. The old file is backed up to `memory_backups/` first (last 30 kept), and the result is rejected if it was cut off or lost too much, leaving memory unchanged.
 
 ### Memory Management & Verification
 * **Triggering a Memory**: Tell the bot "Remember that I love iced lattes". The bot replies and logs `[remember: User loves iced lattes]`.
 * **Inspecting & Editing**: Open `memory_summary.txt` directly to review, edit, or adjust stored memories.
 * **Resetting Memory**: Empty `memory_summary.txt` and set `history.json` to `[]`.
+* **Restoring Memory**: stop the bot, then copy a file from `memory_backups/` back to `memory_summary.txt`.
 
 ---
 
