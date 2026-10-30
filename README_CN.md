@@ -1,4 +1,4 @@
-# QQ AI Companion 智能伴侣框架
+# AI2QQ · QQ AI 伴侣
 
 <div align="center">
 
@@ -7,7 +7,7 @@
 [![OneBot 11](https://img.shields.io/badge/protocol-OneBot%2011-red.svg)](https://11.onebot.dev/)
 [![多模态交互](https://img.shields.io/badge/多模态-看图%20%2B%20语音收发%20%2B%20表情包-brightgreen.svg)]()
 
-**基于 OneBot 11 协议的高性能、超轻量、24 小时无人值守多模态 QQ AI 伴侣/助理开源框架。**
+**一个自己部署、住在你 QQ 里的 AI 伴侣：记得你，只认你。<br>就算它在群里聊天、和你的朋友私聊、逛QQ空间，也始终是你的。**
 
 [English](README.md) | [简体中文](README_CN.md)
 
@@ -15,131 +15,172 @@
 
 ---
 
-## 🌟 核心特性
+## ✨ 它有什么不一样
 
-* **⚡ 极低内存占用 (~30MB RAM)**：
-  * Python 核心守护进程**仅占约 30MB 内存**，可在 1 核 512MB/1GB 的廉价 Linux VPS 上 24 小时平稳运行。
-* **🧠 动态双层记忆与实时更新引擎**：
-  * 自动分层记忆体系：`history.json` 保持近期自然上下文；支持模型实时调用 `[更新记忆: 内容]` 随时持久化记住关键事实；当对话轮数达到阈值，自动触发 Auto-Compact 沉淀至 `memory_summary.txt`。长久铭记偏好，消耗极少 Token！
-* **📜 全量聊天记录持久化与智能检索**：
-  * `chat_history.jsonl` 永久记录每一轮真实对话与时间戳。模型可通过 `[搜索聊天记录: 关键词]` 随时翻阅过去几天甚至几周前谈论过的话题与经历！
-* **🔍 实时联网搜索 (Web Search)**：
-  * 内置实时互联网搜索支持，模型可通过 `[搜索: 关键词]` 实时获取最新时事、天气、百科与技术资讯。
-* **🚀 消息连击缓冲合并 (Smart Debounce & Queue)**：
-  * 当用户快速连续发送多句话时，自动等待 1.8 秒打包合并为一条完整语义进行回复，队列化保障不丢任何消息！
-* **👁️ 多模态视觉（零报错双通道兜底）**：
-  * 支持接收 QQ 图片与表情包。优先通过浏览器头直接下载；若网络拦截，自动回退调用 OneBot 本地缓存接口读取磁盘原图，看图成功率 100%。
-* **🎙️ 语音收发与朗读 (Edge-TTS)**：
-  * 基于微软云端 Edge Neural TTS，免费、免GPU算力生成真实伴侣语音条（支持 `zh-CN-XiaoyiNeural`、`zh-CN-XiaoxiaoNeural` 等）。支持全自动语音模式与标签发送。
-* **🔌 标准 MCP 服务端集成 (Model Context Protocol)**：
-  * 内置 `mcp-server/onebot_mcp.py`，可供 Claude Desktop、Cursor、Antigravity 等外部 AI 客户端直接远程调度与操作 QQ 机器人。
-* **🎭 全模型秒懂的人格体系**：
-  * 人格与规则解耦在 `persona/*.md` 文件中，支持每次对话热重载。提示词杜绝“每句必带表情”的假人感，贴近真人随性自然的打字节奏，字数限制由模型根据语境自主把控。
-* **🏷️ 富媒体与交互标签**：
-  * 支持在回复中自然嵌入 QQ 黄脸表情（`[发表情: 贴贴]`）、专属贴图（`[发贴图: 比心]`）、真实语音（`[发语音: ...]`）及好友互动（`[互动: 戳一戳]`、`[互动: 点赞]`）。
-* **👥 群聊模式（记忆物理隔离）**：
-  * 以同一个人设加入白名单里的 QQ 群：只有被叫到名字、被 @ 或被引用时才回复；身份只认 QQ 号，不认昵称；每个群有独立的上下文与记忆，主人的私人记忆在群里一律不加载（主人本人在群里问也一样）；群友（主人除外）有可配置的发言次数上限。详见 [USAGE.md 第 15 节](USAGE.md#15-群聊模式-group-chat)。
-* **🌐 跨平台无头服务器友好**：
-  * 支持 Windows、Debian、Ubuntu、CentOS，支持在无图形界面的 Docker 终端中通过 ASCII 字符画扫码登录。
+大多数 QQ 机器人有问必答、聊完就忘。AI2QQ 的目标是做一个**连续存在的“人”**，并且清楚地知道谁是它的主人。
+
+| | |
+|---|---|
+| 🔐 **按 QQ 号认主人** | 身份由程序按真实 QQ 号判断。别人改昵称叫“主人”、伪造 `【主人✔】` 标签、说“我是你主人”，都没用。 |
+| 🧠 **记忆不会悄悄消失** | 新事实只会按日期**追加**；只有记忆变得很长时才整理，并且先自动备份到 `memory_backups/`。改口（周三→周四、喜欢→不喜欢）会被记下，不会被当成重复丢掉。 |
+| 🗂️ **主人的私人记忆只属于主人** | 你私聊告诉它的事，永远不会被带进群聊、好友私聊或QQ空间。其他聊天共用一份公共记忆（也可以设成各自一份），所以它在群里认识的人，私聊时也认得。 |
+| 👥 **不刷屏的群聊** | 只有被叫名字、被 @、被引用时才说话；每位群友有消息上限。它还会时不时“瞄一眼”群聊，看到有意思的事**私下告诉你**。 |
+| 💬 **也能和你的朋友聊天** | 其他QQ好友也可以和它私聊（支持黑名单），每人有消息上限，规则和群聊一样严格。 |
+| 🌸 **会逛QQ空间** | 看你和好友的说说、评论、点赞，偶尔也想自己发一条，但**会先问你**。是否同意由程序检查**你的原话**，不看模型怎么说。 |
+| 👀 **你看到的它也看得到** | 图片、表情包、动图、语音、文件、合并转发，以及**引用的消息**。模型看不了图、听不了语音时，会明确提示你，而不是瞎编。 |
+| ⌨️ **像真人一样打字** | 纯文本、连发几个短气泡、真实语音（Edge-TTS）、QQ 表情、表情包、戳一戳，还可以选择不回复。 |
+| 🪶 **轻量，默认就安全** | 约 30 MB 内存。OneBot 接口只监听 `127.0.0.1`，WebUI token 随机生成，不会打印服务器 IP。 |
+
+> 群聊、好友私聊、QQ空间默认都是**关闭**的，在 `config.json` 里按需打开。
 
 ---
 
-## 🏗️ 架构概览
+## 🚀 快速开始
 
-```mermaid
-flowchart LR
-    A["腾讯 QQ 服务器"] <--> B["OneBot 11 框架\n(NapCatQQ Headless / Docker)"]
-    B <-->|"本地 HTTP API (3000端口)"| C["autonomous_agent.py\n(~30MB 极低内存)"]
-    C <-->|"OpenAI / OpenRouter API"| D["任意大语言模型\n(DeepSeek / Gemini / GPT-4o / Claude)"]
-```
-
----
-
-## 🚀 快速上手 (Quick Start)
-
-仅需两步即可极速完成部署与启动：
-
-### 第一步：全自动一键配置 (All-in-One Setup)
-克隆项目仓库并运行 `setup.sh`：
-
+**Linux（Debian / Ubuntu）**
 ```bash
 git clone https://github.com/intfloatjohn/AI2QQ.git
 cd AI2QQ
-chmod +x setup.sh start.sh
-./setup.sh
+./setup.sh     # 第一次：Python 环境、TTS 语音、NapCat（Docker）、config.json
+./start.sh     # 日常启动：启动 NapCat、显示登录二维码、运行机器人
 ```
 
-`setup.sh` 脚本会为你全自动处理好**所有依赖与运行环境**，无需繁琐的手动配置：
-* 📦 自动检测并安装系统组件（`python3`、`python3-venv`、`ffmpeg` 语音转码库、`curl` 等）
-* 🐍 自动创建 Python 独立虚拟环境（`venv/`）并安装全部依赖
-* 🎙️ 自动连接微软云端预热下载 Edge-TTS 神经网络语音引擎并测试发声
-* 🔍 自动联通并验证实时网络搜索功能
-* 🐳 自动拉取并启动 NapCatQQ (OneBot 11) Docker 容器，直接在终端打印黑白二维码供手机 QQ 扫码登录
-* ⚙️ 自动初始化生成 `config.json` 配置文件
+**Windows：** 第一次双击 **`setup_windows.bat`**，之后每天双击 **`start.bat`**。
 
-> **提示**：首次配置后，请在 `config.json` 中填入你的大模型 `api_key`（如 OpenRouter / Gemini API Key）以及 `master_qq`（主人的 QQ 号）：
+然后在 `config.json` 里填上模型 key 和你的 QQ 号：
 ```json
 {
-  "api_key": "YOUR_API_KEY_HERE",
+  "api_key": "你的API_KEY",
+  "base_url": "https://openrouter.ai/api/v1/chat/completions",
+  "model": "google/gemini-3.8-flash",
   "master_qq": 123456789,
-  "model": "google/gemini-3.8-flash"
+  "bot_qq": 987654321
 }
 ```
+支持任何 OpenAI 兼容接口：OpenRouter、Gemini、DeepSeek、GPT、各种中转站等。用**两个 QQ 号**（一个是你，一个给机器人）才能使用群聊、好友私聊和QQ空间。
 
-### 第二步：日常运行与重启 (Daily Launch)
-无论服务器重启还是关闭后台后重新启动，日常只需执行一条命令：
+<details>
+<summary><b>打开更多功能</b></summary>
 
-```bash
-./start.sh
+```json
+{
+  "enable_group_chat": true,
+  "group_whitelist": [123456],
+  "group_member_msg_limit": 50,
+
+  "enable_friend_chat": true,
+  "friend_blacklist": [],
+  "private_member_msg_limit": 50,
+
+  "memory_mode": "shared",
+
+  "enable_qzone": true,
+
+  "thinking_level": "",
+  "thinking_level_background": "low"
+}
 ```
-*`start.sh` 会全自动检测 NapCat Docker 容器状态（未启动则自动唤醒并校验）、激活虚拟环境并启动 AI 伴侣常驻守护进程。*
+每一项的说明见[用户手册](USAGE.md#12-配置文件与核心参数说明-configjson)。
+</details>
 
 ---
 
-#### 🪟 Windows 用户使用指南
-1. **首次配置**：双击运行 **`setup_windows.bat`**（全自动初始化虚拟环境、安装依赖、预热 TTS 引擎并一键下载 NapCat）。
-2. **填写配置**：在 `config.json` 填入 `api_key` 与 `master_qq`。
-3. **日常启动**：双击 **`start.bat`**（或 `start_agent.bat`）即可直接启动！
+## 🧩 工作原理
+
+```mermaid
+flowchart LR
+    Q["QQ"] <--> N["NapCat<br/>(OneBot 11, Docker)"]
+    N <-->|"HTTP 127.0.0.1:3000"| B["autonomous_agent.py"]
+    B <-->|"OpenAI 兼容接口"| M["你的模型"]
+    B --- P["🔒 主人的私人记忆"]
+    B --- S["🌐 公共记忆<br/>（群聊 + 好友）"]
+    B --- Z["🌸 QQ空间"]
+```
+
+每个聊天在 `sessions/` 下都有自己的短期上下文和聊天记录。谁能做什么（修改图库、发说说、读主人的记忆）都由**程序**按真实 QQ 号决定，从不交给模型自己判断。
 
 ---
 
-## 🐧 纯命令行 Linux (Debian / Ubuntu) 部署指南
+## 📚 功能详解
 
-### 1. Docker 部署 NapCatQQ（终端字符画扫码）
-```bash
-docker run -d \
-  --name napcat \
-  --restart always \
-  --network host \
-  -v /opt/napcat/config:/app/napcat/config \
-  mlikiowa/napcat-docker:latest
-```
-直接在终端查看登录二维码：
-```bash
-docker logs -f napcat
-```
-终端会直接打印出黑白 ASCII 字符画二维码，手机 QQ 扫描终端即可秒登！
+<details>
+<summary><b>记忆</b></summary>
 
-### 2. 部署 AI 伴侣为系统常驻服务 (Systemd)
+- 短期上下文（`history.json`）+ 长期记忆（`memory_summary.txt`），模型随时可以用 `[更新记忆: …]` 记下新事实。
+- AutoCompact 从旧对话里提取新事实并追加，不会改写已有内容；“思考型”模型回答被截断时会自动重试。
+- 完整聊天记录（`chat_history.jsonl`），可用 `[搜索聊天记录: …]` 检索。
+- `memory_mode`：`shared`（群聊和好友私聊共用公共记忆，标明来源）或 `separate`（每个聊天各一份）。各聊天自己的记忆文件始终保留。
+
+见[手册 §2](USAGE.md#2-autocompact-长期记忆与实时记忆动态沉淀)。
+</details>
+
+<details>
+<summary><b>群聊</b></summary>
+
+- 被叫名字、被 @ 或被引用时触发；同一个人接着发的消息会合并理解。
+- 每位群友由程序按真实 QQ 号标注身份，伪造的标签会被清除。
+- 需要时打开图片、语音、文件和合并转发；看过的图片和语音保留 7 天并附上描述。
+- 大约每 10 分钟“瞄一眼”群聊，可能私下告诉你一些事（每小时最多 3 次）。
+
+见[手册 §15](USAGE.md#15-群聊模式-group-chat)。
+</details>
+
+<details>
+<summary><b>好友私聊</b></summary>
+
+除黑名单外的所有好友；按 QQ 号认人；每人有消息上限；工具受限；你可以问它“你和小李聊了什么”。见[手册 §17](USAGE.md#17-好友私聊模式-friend-chat)。
+</details>
+
+<details>
+<summary><b>QQ空间（实验功能）</b></summary>
+
+看你和好友的说说并评论、点赞（每天有上限），可以一次看看“大家最近发了什么”，自己想发的说说先变成草稿等你同意。通过 NapCat 的登录状态调用QQ空间网页接口，属于非官方接口，可能随时变化。见[手册 §16](USAGE.md#16-qq空间-qzone实验功能)。
+</details>
+
+<details>
+<summary><b>感知与表达</b></summary>
+
+- 多模态模型可直接看图、听语音；也支持语音转文字、文档提取、合并转发、动图和超级表情、引用消息。
+- 模型不支持时明确提示 `NOT A VISION MODEL` / `VISION IS NOT AVAILABLE: API ERROR`，并自动去掉图片重试。
+- 多气泡连发（`[SEP]` 或空行）、Edge-TTS 语音、QQ 黄脸表情、机器人自己整理的表情包库、戳一戳与点赞。
+- 实时联网搜索和天气。
+
+见[手册 §4–§7、§9](USAGE.md)。
+</details>
+
+<details>
+<summary><b>模型控制</b></summary>
+
+- `thinking_level` / `thinking_level_background`：`none`～`high`，按 OpenRouter、DeepSeek 或 OpenAI 的格式自动发送；模型不接受的级别会自动降级。
+- 每次回复的工具调用和联网搜索次数有上限，费用可控。
+- `persona/` 里的人格文件支持热重载。
+</details>
+
+<details>
+<summary><b>外部接入</b></summary>
+
+`mcp-server/onebot_mcp.py` 让 Claude Desktop、Cursor 等 MCP 客户端可以操作 QQ。见[手册 §11](USAGE.md#11-mcp-服务端与外部客户端接入-onebot_mcppy)。
+</details>
+
+---
+
+<details>
+<summary><b>🐧 手动无头部署（systemd）</b></summary>
+
 ```bash
-chmod +x deploy_debian.sh start_agent.sh
 ./deploy_debian.sh
-
-# 注册为 systemd 开机自启服务
 sudo cp qq-companion.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now qq-companion
 ```
+`start.sh` 已经会用 Docker 运行 NapCat 并在终端里显示登录二维码。想在自己电脑上打开 NapCat WebUI，请用 SSH 隧道（`ssh -L 6099:127.0.0.1:6099 用户名@服务器`），不要对公网开放端口。见[手册 §13](USAGE.md#13-debian--linux-无头部署与终端扫码)。
+</details>
 
----
+## 📖 文档
 
-## 📖 进阶文档
+- **[用户手册（中文）](USAGE.md)** · **[User guide (English)](USAGE_EN.md)**：所有功能和设置。
+- [人格与指令标签](persona/tools.md) · [表情包指南](stickers/STICKERS_GUIDE.md)
 
-* [详细使用指南 (USAGE.md)](USAGE.md)：解答如何修改人格、如何调整 AutoCompact 记忆管理、Log 等级配置及语音音色调优。
-* [表情贴图管理指南 (stickers/STICKERS_GUIDE.md)](stickers/STICKERS_GUIDE.md)：如何让 AI 自动发现并发送自己的表情包。
+## ⚖️ 许可证
 
----
-
-## ⚖️ 开源许可与合规声明 (License & Legal)
-
-本项目完全采用 **[MIT License](LICENSE)** 授权。
+[MIT](LICENSE)。请合理使用：机器人运行在真实 QQ 账号上，建议保持默认上限并使用小号。
