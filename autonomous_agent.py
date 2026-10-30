@@ -3225,6 +3225,13 @@ def send_to_session(session: ChatSession, message) -> dict:
         res = call_onebot_api("send_group_msg", {"group_id": session.target_id, "message": message})
     else:
         res = call_onebot_api("send_private_msg", {"user_id": session.target_id, "message": message})
+    if not (isinstance(res, dict) and res.get("status") == "ok"):
+        where = f"group {session.target_id}" if session.is_group else f"private chat {session.target_id}"
+        detail = ""
+        if isinstance(res, dict):
+            detail = " ".join(str(res.get(k)) for k in ("retcode", "message", "wording") if res.get(k) not in (None, ""))
+        logging.warning(f"Sending to {where} FAILED ({detail or res}). The bot may be muted there, blocked by QQ "
+                        f"risk control, or not in that chat. Text: {render_segments_brief(message, session, max_len=80)[0] if isinstance(message, list) else str(message)[:80]}")
     if isinstance(res, dict) and res.get("status") == "ok":
         mid = (res.get("data") or {}).get("message_id")
         if mid is not None:
