@@ -52,5 +52,16 @@
   "group_max_bubbles": 3,
   "group_glance_enabled": true,
   "group_master_notify_max_per_hour": 3,
-  "group_media_retention_days": 7
+  "group_media_retention_days": 7,
+  "enable_qzone": false,
+  "qzone_check_interval_sec": 1800,
+  "qzone_friends_per_check": 5,
+  "qzone_master_comment_max_per_day": 5,
+  "qzone_comment_max_per_day": 3,
+  "qzone_random_posts": true,
+  "qzone_random_post_chance_per_day": 0.4,
+  "qzone_active_hours": [9, 23],
+  "qzone_post_approval": true,
+  "qzone_post_max_per_day": 3,
+  "qzone_member_request_max_per_day": 3
 }

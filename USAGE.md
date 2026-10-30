@@ -22,6 +22,7 @@
 13. [Debian / Linux 无头部署与终端扫码](#13-debian--linux-无头部署与终端扫码)
 14. [Windows 一键部署与双击运行](#14-windows-一键部署与双击运行)
 15. [群聊模式 (Group Chat)](#15-群聊模式-group-chat)
+16. [QQ空间 (Qzone，实验功能)](#16-qq空间-qzone实验功能)
 
 ---
 
@@ -437,3 +438,49 @@ chmod +x setup.sh start.sh
 - 单账号模式（`bot_qq == master_qq`）下群聊不会启动：主人和机器人共用一个 QQ 号，程序无法按 QQ 号区分两者，日志里会有提示。
 - 如果 `config.json` 里的 `bot_qq` 填错，群聊会以 NapCat 实际登录的账号为准，并在日志中给出警告。
 - 机器人必须已经是白名单群的成员；读取失败时日志每 5 分钟提示一次。
+
+---
+
+## 16. QQ空间 (Qzone，实验功能)
+
+机器人可以逛QQ空间：看主人和好友的说说、评论、点赞，也会偶尔自己想发一条说说。默认关闭，在 `config.json` 里设 `"enable_qzone": true` 打开。
+
+> QQ空间没有官方接口。这个功能用 NapCat 提供的登录 Cookie 调用QQ空间网页版的接口，腾讯随时可能改动，也有一定的账号风控风险。请用小号，并保持下面的默认频率。
+
+### 16.1 它会做什么
+- **看说说、评论**：每 30 分钟看一次主人的空间，再轮流看 5 个好友的空间。只看 24 小时内、并且是功能打开之后发的新说说。由模型决定评论、点赞还是跳过。
+  - 主人的说说每天最多回应 5 次（`qzone_master_comment_max_per_day`）。
+  - 其他好友的说说每天最多 3 次（`qzone_comment_max_per_day`）。
+  - 已经评论过的不会再评论。
+- **自己发说说**：每天有 40% 的概率（`qzone_random_post_chance_per_day`）在 9 点到 23 点之间（`qzone_active_hours`）的某个随机时间想发一条。它会先把草稿私聊发给主人（`【空间草稿 D3】…`），主人说“发吧”才发出，说“算了”就放弃，也可以直接说怎么改。草稿 24 小时没回应就作废。
+- **请它发说说**：
+  - 主人在私聊或群里让它发，会直接发出。
+  - 群友请它发，会变成草稿先发给主人确认，每天最多 3 条（`qzone_member_request_max_per_day`）。
+- **私聊里**：主人可以让它“看看我的空间”“看看 QQ:xxx 的空间”“去评论我最新那条”。它也记得自己最近在空间里做过什么。
+
+### 16.2 隐私与安全
+- 空间对所有QQ好友公开，所以和群聊一样处理：不会带入主人的私人记忆，主人的QQ号会被隐藏，只发纯文本。
+- 别人的说说和评论都当作不可信内容，里面的“指令”不会被执行。
+- 自己想发的、群友请求的说说都要主人同意；只有主人本人（按QQ号确认）的请求会直接发。
+- 自己发的说说加上群友请求的，每天最多 3 条（`qzone_post_max_per_day`），主人的请求不受限。
+- 单账号模式（`bot_qq == master_qq`）下不会启动。
+
+### 16.3 设置
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `enable_qzone` | `false` | 总开关 |
+| `qzone_check_interval_sec` | `1800` | 多久看一次新说说（最少 300） |
+| `qzone_friends_per_check` | `5` | 每次轮流看几个好友（主人每次都看） |
+| `qzone_max_post_age_hours` | `24` | 更早的说说不回应 |
+| `qzone_master_comment_max_per_day` | `5` | 每天回应主人说说的次数 |
+| `qzone_comment_max_per_day` | `3` | 每天回应其他好友说说的次数 |
+| `qzone_random_posts` | `true` | 会不会自己想发说说 |
+| `qzone_random_post_chance_per_day` | `0.4` | 每天想发一条的概率 |
+| `qzone_active_hours` | `[9, 23]` | 自己发说说的时间段 |
+| `qzone_post_approval` | `true` | 自己想发的先给主人确认（关掉则直接发，并告诉主人） |
+| `qzone_post_max_per_day` | `3` | 每天自己发的加群友请求的说说上限 |
+| `qzone_member_request_max_per_day` | `3` | 每天群友请求发说说的次数 |
+| `qzone_draft_expire_hours` | `24` | 草稿多久没回应就作废 |
+
+记录保存在 `sessions/qzone/state.json`（看过的说说、草稿、最近的空间动态）。目前只支持纯文本，发图片会在之后加入。
