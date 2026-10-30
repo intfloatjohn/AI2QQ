@@ -1221,8 +1221,11 @@ def trigger_auto_compact(session: ChatSession):
         keep_recent = config.get("compact_keep_recent", 12)
         if len(session.history) < threshold:
             return
-        to_archive = session.history[:-keep_recent]
+        keep_recent = max(0, to_int(keep_recent, 12))
+        to_archive = session.history[:-keep_recent] if keep_recent else list(session.history)
         memory_snapshot = session.long_term_memory
+    if not to_archive:
+        return
 
     logging.info(f"AutoCompact [{session.key}]: Archiving {len(to_archive)} older turns into long-term memory...")
     lang = config.get("language", "zh").lower()
@@ -1254,7 +1257,7 @@ def trigger_auto_compact(session: ChatSession):
         f"{rules}\n\n【Existing Memory】:\n{memory_snapshot or 'None yet'}\n\n【Dialogue to Archive】:\n{formatted_dialogue}")
 
     try:
-        text, finish = raw_llm_call_ex(prompt, max_tokens=1200)
+        text, finish = raw_llm_call_full(prompt, max_tokens=1500)
     except Exception as e:
         logging.error(f"AutoCompact [{session.key}] failed, history kept for next time: {e}")
         return
@@ -1312,7 +1315,7 @@ def consolidate_memory(session: ChatSession):
         "One fact per line starting with \"- \", oldest first. Output only the list.\n\n"
         f"【Long-term memory】:\n{before}")
     try:
-        text, finish = raw_llm_call_ex(prompt, max_tokens=4000)
+        text, finish = raw_llm_call_full(prompt, max_tokens=4000)
     except Exception as e:
         logging.warning(f"[{session.key}] Memory consolidation failed (memory unchanged): {e}")
         return
@@ -1462,6 +1465,18 @@ def model_supports_vision(model_name: str = None) -> bool:
 
 def raw_llm_call(prompt: str, max_tokens: int = 800) -> str:
     return raw_llm_call_ex(prompt, max_tokens)[0]
+
+def raw_llm_call_full(prompt: str, max_tokens: int = 1500) -> tuple:
+    """Like raw_llm_call_ex, but when the answer is cut off (thinking models spend part of the
+    budget on hidden reasoning) it asks again with a much bigger budget."""
+    text, finish = raw_llm_call_ex(prompt, max_tokens)
+    if finish == "length":
+        bigger = min(max_tokens * 4, 16000)
+        logging.info(f"Model answer was cut off at {max_tokens} tokens; retrying with {bigger}.")
+        text2, finish2 = raw_llm_call_ex(prompt, bigger)
+        if text2:
+            return text2, finish2
+    return text, finish
 
 def raw_llm_call_ex(prompt: str, max_tokens: int = 800) -> tuple:
     """Returns (text, finish_reason). finish_reason "length" means the answer was cut off."""
