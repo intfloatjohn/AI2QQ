@@ -47,8 +47,8 @@ All files controlling the AI companion's character, personality, speech style, a
 
 ### Dynamic Multi-Tier Memory Architecture
 1. **Short-Term Context** (`history.json`): Preserves recent conversational turns for immediate dialogue continuity.
-2. **Realtime Dynamic Memory Updates**: When the AI companion discovers key facts, user preferences, or when the user says "remember that...", the AI outputs `[remember: content]` (or `[更新记忆: 内容]`). The backend immediately appends this fact to `memory_summary.txt` without waiting for context compaction!
-3. **Long-Term Memory Retrieval**: The AI can autonomously recall its archive by issuing `[read_memory]` (or `[查看记忆]`).
+2. **Realtime Dynamic Memory Updates**: When the AI companion discovers key facts, user preferences, or when the user says "remember that...", the AI outputs `[remember: content]`. The backend immediately appends this fact to `memory_summary.txt` without waiting for context compaction!
+3. **Long-Term Memory Retrieval**: The AI can autonomously recall its archive by issuing `[read_memory]`.
 4. **Auto-Compact**: When conversation turns reach the threshold (`compact_threshold`, default: 30), a background worker extracts **new** facts from the older turns and appends them, dated, to `memory_summary.txt`, keeping the most recent 12 turns in active context. Existing memory is never rewritten or deleted here; if the model call fails, the old turns are kept for next time.
 5. **Tidying and backups**: when memory grows past `memory_max_chars` (default 8000 characters; `group_memory_max_chars`, 3000, for groups), the model merges duplicate and outdated entries. The old file is backed up to `memory_backups/` first (last 30 kept), and the result is rejected if it was cut off or lost too much, leaving memory unchanged.
 
@@ -67,7 +67,7 @@ Every user message and bot reply is permanently saved to `chat_history.jsonl` wi
 
 ### Intelligent Chat History Search
 The AI companion can search past conversations at any time:
-* **Tag Syntax**: `[search_history: keyword]` (or `[搜索聊天记录: 关键词]`)
+* **Tag Syntax**: `[search_history: keyword]`
 * **Example**: When the user asks "Do you remember the name of that project I mentioned last week?", the AI outputs `[search_history: project]`. The system retrieves relevant history snippets with timestamps and presents them as tool observations.
 
 ---
@@ -96,17 +96,17 @@ The framework provides two distinct image capabilities: **Static Predefined Stic
 ### 5.1 Static Predefined Stickers (`stickers/`)
 * Located in `stickers/`. Place `.jpg` or `.png` files here with short keywords:
   `heart.jpg`, `wave.jpg`, `sleep.jpg`, `avatar.jpg`.
-* The AI outputs `[sticker: heart]` or `[发贴图: 比心]` to dispatch matching stickers.
+* The AI outputs `[sticker: heart]` to dispatch matching stickers.
 
 ### 5.2 Autonomous Visual & Meme Database (`picture_db/`)
 The AI companion has complete administrative autonomy over its visual library:
 1. **Automatic Ingestion**: Photos, memes, and GIFs sent by the user are automatically saved and indexed with metadata in `picture_db/metadata.json`.
 2. **Autonomous Commands**:
-   * **Dispatch Picture**: `[PICTURE: keyword or tag]` or `[发图: 关键词]` (e.g. `[PICTURE: happy cat]`, `[发图: 比心]`).
-   * **Save Sticker with Tags**: `[SAVE_STICKER: tag1, tag2: description]` (or `[收藏表情: 标签: 描述]`).
-   * **Browse Library**: `[LIST_PICTURES]` or `[LIST_PICTURES: query]` (or `[查看图库]`).
-   * **Modify Existing Image**: `[MODIFY_PICTURE: target ID or tag: new tags: new summary]` (or `[修改图片: ...]`).
-   * **Delete Image**: `[DELETE_PICTURE: target ID or tag]` (or `[删除图片: ...]`).
+   * **Dispatch Picture**: `[PICTURE: keyword or tag]` (e.g. `[PICTURE: happy cat]`).
+   * **Save Sticker with Tags**: `[SAVE_STICKER: tag1, tag2: description]`.
+   * **Browse Library**: `[LIST_PICTURES]` or `[LIST_PICTURES: query]`.
+   * **Modify Existing Image**: `[MODIFY_PICTURE: target ID or tag: new tags: new summary]`.
+   * **Delete Image**: `[DELETE_PICTURE: target ID or tag]`.
 3. **Save-Before-Send Architecture**: Picture saves and modifications execute *before* picture dispatches. This ensures that when the AI saves a newly received sticker and sends it back in the same reply, the sticker is immediately located in the database and dispatched without failure.
 
 ---
@@ -136,7 +136,7 @@ The system integrates Microsoft's high-fidelity `edge-tts` cloud neural voice en
    * Mobile QQ requires audio in Tencent Silk v3 format with the `\x02#!SILK_V3` header.
    * Transcoding is automatically handled by `pilk` and `graiax-silkcoder` fallback, guaranteeing 100% audible playback on iOS and Android QQ.
 2. **Dispatch Modes**:
-   * **On-Demand**: Triggered when the AI reply includes `[voice: text to read]` or `[发语音: 文本]`.
+   * **On-Demand**: Triggered when the AI reply includes `[voice: text to read]`.
    * **Full Auto Voice**: Set `"enable_voice_reply": true` in `config.json` to synthesize every reply into an audio bubble.
 3. **Voice Profiles**:
    Configured via `"voice_character"` in `config.json`:
@@ -175,7 +175,7 @@ The framework supports two operational models:
 
 Built-in real-time web search capabilities (powered by DuckDuckGo and Wikipedia APIs):
 * **Invocation**:
-  * Inline Tag: `[search: query]` (or `[搜索: 关键词]`)
+  * Inline Tag: `[search: query]`
   * Native Tool Calling: `web_search(query)`
 * **Settings**: Configure `"enable_web_search": true` and `"max_search_results": 4` in `config.json`.
 * **Use Cases**: Weather forecasts, breaking news, technical documentation lookups, and fact checking.
@@ -335,7 +335,7 @@ Add these fields to `config.json` (group chat needs two different QQ accounts, i
   "enable_group_chat": true,
   "group_whitelist": [123456789],
   "bot_name": "Hoshineko",
-  "group_trigger_keywords": ["Hoshineko", "星喵"],
+  "group_trigger_keywords": ["Hoshineko", "Neko"],
   "group_member_msg_limit": 10,
   "group_member_limit_window_sec": 86400
 }
@@ -460,7 +460,7 @@ There is still one unified `picture_db/`, but every picture has a visibility sco
 
 ## 16. Qzone (experimental)
 
-The bot can use QQ Zone (QQ空间): read the Master's and friends' posts, comment and like, and now and then write a post of its own. Off by default; turn it on with `"enable_qzone": true` in `config.json`.
+The bot can use QQ Zone (Qzone): read the Master's and friends' posts, comment and like, and now and then write a post of its own. Off by default; turn it on with `"enable_qzone": true` in `config.json`.
 
 > Qzone has no official API. This uses the Qzone website's endpoints with the login cookies NapCat provides. Tencent can change them at any time, and there is some risk of account checks. Use a secondary account and keep the default limits below.
 
@@ -471,8 +471,9 @@ The bot can use QQ Zone (QQ空间): read the Master's and friends' posts, commen
   - It never comments twice on the same post.
 - **Its own posts**: each day there is a 40% chance (`qzone_random_post_chance_per_day`) that at a random time between 9:00 and 23:00 (`qzone_active_hours`) it wants to post. It sends the draft to the Master first (`[Qzone draft D3] …`). It posts only after the Master says OK, drops it if the Master says no, and can rewrite it on request. Drafts expire after 24 hours.
 - **Asking it to post**:
-  - When the Master's own message asks for a post ("发条说说", "post this on Qzone"…), in private chat or in a group, it posts directly. The program checks the Master's actual words (quoted text doesn't count); anything the model decides on its own becomes a draft.
-  - A draft is posted only when the Master's reply approves it (发吧 / 可以 / ok…, with no 不要 / 别 / 算了 / no); a changed text becomes a new draft to approve.
+  - When the Master's own message asks for a post (e.g. "post this on Qzone"), in private chat or in a group, it posts directly. The program checks the Master's actual words (quoted text doesn't count); anything the model decides on its own becomes a draft.
+  - A draft is posted only when the Master's reply approves it (ok / yes / sure / go ahead / post it…, with no no / don't / cancel / wait / not yet); a changed text becomes a new draft to approve.
+  - The bot also understands the Chinese phrases listed in [USAGE.md §16](USAGE.md#16-qq空间-qzone实验功能), so Chinese-speaking owners can ask and approve in Chinese.
   - When a group member asks, the post becomes a draft for the Master to approve (at most 3 a day, `qzone_member_request_max_per_day`).
 - **In private chat** the Master can say "look at my Qzone", "look at QQ:xxx's Qzone", "what have my friends posted" (newest posts from the last 24 hours by the Master and all friends, up to 10; at most 20 more spaces read per request) or "comment on my latest post". The bot also remembers what it recently did on Qzone.
 

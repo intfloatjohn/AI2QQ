@@ -21,7 +21,7 @@ Most QQ chatbots answer every message and forget everything. AI2QQ is built to f
 
 | | |
 |---|---|
-| 🔐 **It knows who you are, by QQ number** | Your identity is checked against your real QQ ID in code. Nicknames like "主人", fake `【主人✔】` labels or "I'm your master" from someone else change nothing. |
+| 🔐 **It knows who you are, by QQ number** | Your identity is checked against your real QQ ID in code. Nicknames like "Master", fake `【Master✔】` labels or "I'm your master" from someone else change nothing. |
 | 🧠 **Memory that never quietly disappears** | New facts are only *added*, with dates. Tidying happens only when memory gets large, with automatic backups in `memory_backups/`. Corrections (Wed → Thu, likes → dislikes) are kept, not dropped. |
 | 🗂️ **Your private memory stays private** | What you tell it in private chat is never loaded into groups, friend chats or Qzone. Other chats share one public memory (or one each, if you prefer), so it still recognises people across a group and their private chat. |
 | 👥 **Group chat that doesn't spam** | Speaks only when its name is mentioned, it's @'d, or its message is quoted. Per-member message limits. It can skim the group now and then and **tell you privately** if something interesting happens. |
@@ -106,9 +106,9 @@ Every chat has its own short-term history and log under `sessions/`. Who may do 
 <details>
 <summary><b>Memory</b></summary>
 
-- Short-term context (`history.json`) plus long-term memory (`memory_summary.txt`) the model can read and update anytime with `[更新记忆: …]`.
+- Short-term context (`history.json`) plus long-term memory (`memory_summary.txt`) the model can read and update anytime with `[remember: …]`.
 - AutoCompact pulls new facts out of older messages and appends them; nothing is rewritten. Answers cut off by "thinking" models are retried automatically.
-- Full chat log (`chat_history.jsonl`) searchable with `[搜索聊天记录: …]`.
+- Full chat log (`chat_history.jsonl`) searchable with `[search_history: …]`.
 - `memory_mode`: `shared` (groups and friend chats share one public memory, with sources) or `separate` (one per chat). Per-chat files are always kept.
 
 See [USAGE §2](USAGE_EN.md#2-autocompact-long-term-memory--realtime-memory-dynamic-updates).
@@ -179,7 +179,7 @@ sudo systemctl enable --now qq-companion
 ## 📖 Documentation
 
 - **[User guide (English)](USAGE_EN.md)** · **[用户手册 (中文)](USAGE.md)**: every feature and setting.
-- [Persona & tool tags](persona/tools_en.md) · [Stickers guide](stickers/STICKERS_GUIDE.md)
+- [Persona & tool tags](persona/tools_en.md) · [Stickers guide](stickers/STICKERS_GUIDE_EN.md)
 
 ## ⚖️ License
 

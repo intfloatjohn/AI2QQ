@@ -80,8 +80,8 @@ Qzone is visible to all QQ friends; permissions are checked by the program using
 Master's private chat:
 - `[read_qzone]` / `[read_qzone: QQ]` / `[read_qzone: me]` ↔ `qzone_read`: read the recent posts and comments of the Master, a friend, or the bot itself (fed back to the model as untrusted content).
 - `[read_qzone: all]` ↔ `qzone_read` with `qq` = `all`: newest posts from the last 24 hours by the Master and every friend whose space is visible, up to 10. Each call reads at most 20 more spaces (spaces read in the last 30 minutes are reused); the rest are covered next time.
-- `[post_qzone: text]` ↔ `qzone_post`: posted directly only when the Master's own message in this turn asks for a post (e.g. "发条说说", "post this on Qzone"); otherwise it becomes a draft for the Master. The program checks the Master's actual words (not quoted text), not what the model says.
-- `[publish_draft: D3]` ↔ `qzone_post` with `draft_id`: posted only if the Master's message approves it (发吧 / 可以 / ok…, with no 不要 / 别 / 算了 / no); a changed text becomes a new draft for the Master to approve.
+- `[post_qzone: text]` ↔ `qzone_post`: posted directly only when the Master's own message in this turn asks for a post (e.g. "post this on Qzone"; Chinese requests work too); otherwise it becomes a draft for the Master. The program checks the Master's actual words (not quoted text), not what the model says.
+- `[publish_draft: D3]` ↔ `qzone_post` with `draft_id`: posted only if the Master's message approves it (ok / yes / sure / go ahead / post it…, with no no / don't / cancel / wait / not yet; Chinese works too); a changed text becomes a new draft for the Master to approve.
 - `[discard_draft: D3]` ↔ `qzone_discard_draft`: drop a draft the Master doesn't want.
 - `qzone_comment` (tool only): comment on a post when the Master asks; post IDs come from `qzone_read`.
 
