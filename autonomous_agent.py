@@ -39,7 +39,7 @@ import ipaddress
 import urllib.request
 import urllib.error
 import urllib.parse
-from collections import deque
+from collections import deque, OrderedDict
 
 try:
     import requests
@@ -351,6 +351,7 @@ class ChatSession:
         self.quota_lock = threading.Lock()
         self.limit_notified = {}
         self.quoted_sender_cache = {}
+        self.msg_cache = OrderedDict()   # message_id -> (sender uid, name, short text); used to show quotes
         self.poll_error_logged_at = 0.0
 
         self.load()
@@ -2700,6 +2701,14 @@ def send_to_session(session: ChatSession, message) -> dict:
         if mid is not None:
             session.seen_ids.add(mid)
             session.bot_msg_ids.add(mid)
+            try:
+                if isinstance(message, list):
+                    sent_text = render_segments_brief(message, session, max_len=300)[0]
+                else:
+                    sent_text = re.sub(r'\[CQ:[^\]]*\]', '', str(message))[:300]
+                cache_message(session, mid, get_bot_qq(), BOT_SENT_MARK, sent_text)
+            except Exception:
+                pass
     return res
 
 def _remove_file_later(path: str, delay: float = 60.0):
@@ -3822,6 +3831,8 @@ def build_group_turn(session: ChatSession, batch: list) -> tuple:
             txt = (a["opened"][0] or a["text"])[:1500] + _attachment_ref(opened_nums[id(a)])
         else:
             txt = a["text"]
+        if a.get("quote"):
+            txt += f"\n{a['quote']}"
         bg_lines.append(f"{group_speaker_label(a['uid'], a['name'])} {_indent_continuation(txt)}")
 
     # --- Messages addressed to the bot
@@ -4081,6 +4092,18 @@ def on_message_arrived(msg_id: int, sender_id: int, raw_text: str):
 
     session = get_master_session()
     clean_text, images_b64, audios_data, has_voice = parse_incoming_cq_content(raw_text, sender_id, session)
+    cache_message(session, msg_id, sender_id, "", clean_text)
+    quoted_mid = quoted_message_id(raw_text)
+    if quoted_mid:
+        try:
+            note, q_images, q_audios = resolve_private_quote(session, quoted_mid)
+        except Exception as e:
+            logging.warning(f"Failed to load quoted message {quoted_mid}: {e}")
+            note, q_images, q_audios = quote_unavailable_note(), [], []
+        clean_text = f"{note}\n{clean_text}".strip()
+        images_b64 = list(q_images) + list(images_b64 or [])
+        audios_data = list(q_audios) + list(audios_data or [])
+        logging.info(f"Message {msg_id} quotes message {quoted_mid}: {note[:120]}")
     now_str = datetime.datetime.now().strftime("%H:%M:%S")
     logging.info(f"Incoming message [{now_str}] (MsgID: {msg_id}) from {sender_id}: {clean_text[:120]}")
 
@@ -4309,6 +4332,84 @@ def parse_cq_string_to_segments(raw: str) -> list:
     if raw and pos < len(raw):
         segs.append({"type": "text", "data": {"text": _cq_unescape(raw[pos:])}})
     return segs
+
+# ==============================================================================
+# Quoted messages (引用回复)
+# ==============================================================================
+_REPLY_CQ_RE = re.compile(r'\[CQ:reply,(?:[^\]]*?,)?id=(-?\d+)[^\]]*\]', re.IGNORECASE)
+QUOTE_MAX_CHARS = 500
+BOT_SENT_MARK = "\x00bot"   # msg_cache name for messages the bot sent (works in self-chat mode too)
+QUOTE_MAX_IMAGES = 2
+
+def cache_message(session: ChatSession, mid, uid, name: str, text: str):
+    """Remembers a short version of a message so a later quote of it can be shown even when
+    get_msg fails."""
+    if mid in (None, ""):
+        return
+    session.msg_cache[str(mid)] = (to_int(uid, 0), name or "", (text or "")[:QUOTE_MAX_CHARS])
+    session.msg_cache.move_to_end(str(mid))
+    while len(session.msg_cache) > 500:
+        session.msg_cache.popitem(last=False)
+
+def is_bot_message(session: ChatSession, mid) -> bool:
+    """True if the bot itself sent this message (by the IDs NapCat returned when sending)."""
+    if mid in (None, ""):
+        return False
+    if mid in session.bot_msg_ids or to_int(mid, None) in session.bot_msg_ids or str(mid) in session.bot_msg_ids:
+        return True
+    hit = session.msg_cache.get(str(mid))
+    return bool(hit) and hit[1] == BOT_SENT_MARK
+
+def quoted_message_id(segments_or_cq) -> str:
+    if isinstance(segments_or_cq, str):
+        m = _REPLY_CQ_RE.search(segments_or_cq)
+        return m.group(1) if m else ""
+    for seg in segments_or_cq or []:
+        if seg.get("type") == "reply":
+            return str((seg.get("data") or {}).get("id") or "")
+    return ""
+
+def _quote_text(text: str) -> str:
+    text = sanitize_untrusted_text(str(text or "")).strip()
+    return text[:QUOTE_MAX_CHARS] + ("…" if len(text) > QUOTE_MAX_CHARS else "")
+
+def quote_unavailable_note() -> str:
+    return L("（引用了一条之前的消息，但获取不到它的内容）", "(quoting an earlier message whose content could not be loaded)")
+
+def cached_quote_note(session: ChatSession, quoted_mid) -> str:
+    """Quote note from the local cache only (no API call); used for background messages."""
+    hit = session.msg_cache.get(str(quoted_mid))
+    if not hit:
+        return ""
+    q_uid, q_name, q_text = hit
+    if is_bot_message(session, quoted_mid) or (q_uid == get_bot_qq() and not is_self_chat_mode()):
+        return L(f"（回复的是你之前说的：“{_quote_text(q_text)}”）", f"(replying to what you said: \"{_quote_text(q_text)}\")")
+    if not session.is_group:
+        return L(f"（引用了主人自己之前的消息：“{_quote_text(q_text)}”）", f"(quoting Master's own earlier message: \"{_quote_text(q_text)}\")")
+    who = group_speaker_label(q_uid, q_name)
+    return L(f"（引用了{who}的消息：“{_quote_text(q_text)}”）", f"(quoting {who}: \"{_quote_text(q_text)}\")")
+
+def resolve_private_quote(session: ChatSession, quoted_mid) -> tuple:
+    """For a quote in the Master's private chat: (note, images_b64, audios). Pictures and voice
+    in the quoted message are opened too, so the model can see what is being referred to."""
+    res = call_onebot_api("get_msg", {"message_id": to_int(quoted_mid, quoted_mid)}, quiet=True)
+    d = (res.get("data") or {}) if isinstance(res, dict) and res.get("status") == "ok" else {}
+    if not d or (d.get("message_type") and d.get("message_type") != "private"):
+        return (cached_quote_note(session, quoted_mid) or quote_unavailable_note()), [], []
+    q_uid = to_int(d.get("user_id") or (d.get("sender") or {}).get("user_id"), 0)
+    raw = _REPLY_CQ_RE.sub("", extract_full_message_text(d))   # no nested quotes
+    q_text, q_images, q_audios, _ = parse_incoming_cq_content(raw, q_uid, session)
+    if not q_text and q_images:
+        q_text = L("[图片]", "[picture]")
+    q_text = _quote_text(q_text)
+    if is_bot_message(session, quoted_mid) or (not is_self_chat_mode() and q_uid == get_bot_qq()):
+        note = L(f"（引用了你之前说的：“{q_text}”）", f"(quoting what you said earlier: \"{q_text}\")")
+    else:
+        note = L(f"（引用了主人自己之前的消息：“{q_text}”）", f"(quoting Master's own earlier message: \"{q_text}\")")
+    if q_images:
+        note += L(f"（被引用的消息里有 {len(q_images[:QUOTE_MAX_IMAGES])} 张图，已附上）",
+                  f" ({len(q_images[:QUOTE_MAX_IMAGES])} picture(s) from the quoted message attached)")
+    return note, q_images[:QUOTE_MAX_IMAGES], q_audios[:1]
 
 def get_message_segments(m: dict) -> list:
     msg = m.get("message")
@@ -4612,6 +4713,7 @@ def handle_group_message(session: ChatSession, m: dict, background_only: bool = 
         return
 
     brief, image_datas = render_segments_brief(segments, session)
+    cache_message(session, m.get("message_id"), uid, name, brief)
     if background_only:
         reasons, quoted_mid, quoted_is_bot = set(), None, False
     else:
@@ -4630,6 +4732,9 @@ def handle_group_message(session: ChatSession, m: dict, background_only: bool = 
         if brief or image_datas:
             entry = {"mid": mid, "uid": uid, "name": name, "text": brief or L("[消息]", "[message]"),
                      "ts": ts, "seen_at": now}
+            bg_quoted = quoted_message_id(segments)
+            if bg_quoted:
+                entry["quote"] = cached_quote_note(session, bg_quoted) or L("（引用了一条较早的消息）", "(quoting an earlier message)")
             if any(seg.get("type") in GROUP_MEDIA_TYPES for seg in segments):
                 entry["media_segments"] = list(segments)   # opened later, only if the bot gets called
             session.ambient.append(entry)
@@ -4691,6 +4796,8 @@ def process_group_trigger(session: ChatSession, m: dict, segments: list, uid: in
                         audios_data.extend(q_auds)
                     quote_note = L(f"（引用了{group_speaker_label(q_uid, q_name)}的消息：“{q_text}”）",
                                    f"(quoting {group_speaker_label(q_uid, q_name)}: \"{q_text}\")")
+            else:
+                quote_note = cached_quote_note(session, quoted_mid) or quote_unavailable_note()
 
         enqueue_session_message(session, {
             "msg_id": m.get("message_id"),

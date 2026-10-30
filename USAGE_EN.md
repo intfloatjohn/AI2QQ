@@ -343,6 +343,7 @@ Other group messages don't trigger a reply; they are only shown to the model as 
 
 **Pictures, stickers, files and forwarded chats**:
 - Pictures in the message that calls the bot, in follow-up messages and in a quoted message are opened for the model.
+- **Quotes**: in private and group chats the model sees which message was quoted, who wrote it and what it said (e.g. `(quoting what you said earlier: "bring an umbrella tomorrow")`). In private chat, pictures in the quoted message are attached too (up to 2). Quotes inside background group messages are shown as well. If the quoted message can't be loaded, the model is told so.
 - From what was posted since the bot's last reply, the most recent `group_context_media` pictures / forwarded chats / files / voice messages are opened (default 2, within 5 minutes). So "@bot what do you think?" can see a picture someone else just posted.
 - At most 4 pictures are attached per reply, with a note telling the model who posted each one.
 - Stickers the bot has looked at are saved to the library automatically, and the model is told their library ID so it can resend one with `[PICTURE: ID]`. Stickers from the Master are shared; other members' stickers stay in that group. Ordinary photos are not saved automatically (use `[SAVE_STICKER: …]` when wanted).
